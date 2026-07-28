@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -26,6 +27,7 @@
 #include "Entities/EntityTweener.h"
 #include "Environment.h"
 #include "GameCommands/GameCommands.h"
+#include "GameState.h"
 #include "Graphics/Colour.h"
 #include "Graphics/Gfx.h"
 #include "Gui.h"
@@ -36,6 +38,7 @@
 #include "Localisation/Languages.h"
 #include "Localisation/StringIds.h"
 #include "Logging.h"
+#include "Map/MapGenerator/MapGenerator.h"
 #include "Map/TileManager.h"
 #include "MessageManager.h"
 #include "MultiPlayer.h"
@@ -43,7 +46,9 @@
 #include "Objects/ObjectIndex.h"
 #include "Objects/ObjectManager.h"
 #include "OpenLoco.h"
+#include "S5/S5.h"
 #include "Scenario/ScenarioManager.h"
+#include "Scenario/ScenarioOptions.h"
 #include "SceneManager.h"
 #include "Scenes/BootScene.h"
 #include "Scenes/GameScene.h"
@@ -454,6 +459,75 @@ namespace OpenLoco
             }
 
             Scenes::GameScene::tick();
+        }
+    }
+
+    // Selects and loads every currently indexed object, regardless of type. Used by
+    // generateSaveGame to build a game state without any UI-driven object selection.
+    // Vanilla-only object types (region/currency/climate/building/industry/competitor
+    // and so on) may have zero objects installed when only OpenGraphics assets are
+    // present; those types are simply left unselected.
+    static void selectAndLoadAllAvailableObjects()
+    {
+        ObjectManager::unloadAll();
+
+        auto& selection = ObjectManager::prepareSelectionList(false);
+        for (auto i = 0U; i < kMaxObjectTypes; ++i)
+        {
+            const auto type = static_cast<ObjectType>(i);
+            for (auto& obj : ObjectManager::getAvailableObjects(type))
+            {
+                selection.selectObject(ObjectManager::SelectObjectModes::defaultSelect, obj.object._header);
+            }
+        }
+        ObjectManager::loadSelectionListObjects(selection.objectFlags);
+        ObjectManager::freeSelectionList();
+
+        ObjectManager::reloadAll();
+    }
+
+    // Procedurally generates a small, tickable game state and exports it as an S5 save.
+    // This does not go through the editor / UI object selection flow; instead it selects
+    // every object that is available (see selectAndLoadAllAvailableObjects) and generates
+    // a small landscape with no towns, industries or companies, since the object types
+    // required for those (building, industry, competitor) are not part of the free
+    // OpenGraphics asset set and so are typically unavailable in a headless environment
+    // without vanilla Locomotion assets installed.
+    void generateSaveGame(const fs::path& path, uint32_t seed)
+    {
+        initialise();
+
+        selectAndLoadAllAvailableObjects();
+
+        auto& options = Scenario::getOptions();
+        options = Scenario::Options{};
+        options.scenarioStartYear = 1900;
+        options.minLandHeight = 2;
+        options.topographyStyle = Scenario::TopographyStyle::smallHills;
+        options.hillDensity = 50;
+        options.numberOfForests = 0;
+        options.numberRandomTrees = 0;
+        options.numberOfTowns = 0;
+        options.numberOfIndustries = 0;
+        options.maxCompetingCompanies = 0;
+        options.competitorStartDelay = 0;
+        options.generator = Scenario::LandGeneratorType::Original;
+        options.numTerrainSmoothingPasses = 2;
+
+        auto& gameState = getGameState();
+        gameState.seaLevel = 4;
+
+        // Deterministic rng: the same seed always produces the same landscape and, in
+        // turn, a byte-identical save file.
+        gameState.rng = Core::Prng(seed, ~seed);
+
+        std::strncpy(gameState.scenarioName, "Generated Fixture", sizeof(gameState.scenarioName) - 1);
+
+        Scenario::generateLandscape();
+
+        if (!S5::exportGameStateToFile(path, S5::SaveFlags::none))
+        {
+            throw std::runtime_error("Unable to export generated save game");
         }
     }
 

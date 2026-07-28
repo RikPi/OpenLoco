@@ -21,6 +21,11 @@ namespace OpenLoco
     void resetSubsystems();
     void simulateGame(const fs::path& path, int32_t ticks);
 
+    // Procedurally generates a small, tickable game state (headless, without requiring
+    // vanilla Locomotion assets) and exports it as an S5 save. Used to create fixture
+    // saves for testing. The same seed always produces a byte-identical save.
+    void generateSaveGame(const fs::path& path, uint32_t seed);
+
     void initialise();
     void update();
     void sub_431695(uint16_t var_F253A0);

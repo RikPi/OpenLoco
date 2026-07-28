@@ -37,6 +37,7 @@ namespace OpenLoco
         std::cout << "                uncompress [options] <path>" << std::endl;
         std::cout << "                simulate [options] <path> <ticks> [path]" << std::endl;
         std::cout << "                compare [options] <path1> <path2>" << std::endl;
+        std::cout << "                gensave [options] <path>" << std::endl;
         std::cout << std::endl;
         std::cout << "options:" << std::endl;
         std::cout << "--bind                     Address to bind to when hosting a server" << std::endl;
@@ -52,6 +53,8 @@ namespace OpenLoco
         std::cout << "                              Default: \"info, warning, error\"" << std::endl;
         std::cout << "--all                -a     For compare, print out all divergences" << std::endl;
         std::cout << "--locomotion_path           Overrides the path to Locomotion install." << std::endl;
+        std::cout << "--seed                      Seed for gensave; the same seed always produces" << std::endl;
+        std::cout << "                            a byte-identical save." << std::endl;
     }
 
     static int uncompressFile(const CommandLineOptions& options)
@@ -201,6 +204,37 @@ namespace OpenLoco
         return EXIT_SUCCESS;
     }
 
+    static int gensave(const CommandLineOptions& options)
+    {
+        if (options.path.empty())
+        {
+            Logging::error("No output file specified.");
+            return EXIT_FAILURE;
+        }
+
+        auto outPath = fs::u8path(options.path);
+        const uint32_t seed = options.seed.value_or(0x5CA1AB1EU);
+
+        try
+        {
+            OpenLoco::generateSaveGame(outPath, seed);
+        }
+        catch (const std::exception& e)
+        {
+            Logging::error("Unable to generate save game {}: {}", outPath.u8string(), e.what());
+            return EXIT_FAILURE;
+        }
+
+        Logging::info("--------------------------------");
+        Logging::info("- Gensave");
+        Logging::info("--------------------------------");
+        Logging::info("Output:");
+        Logging::info("  path: {}", outPath.u8string());
+        Logging::info("  seed: {}", seed);
+
+        return EXIT_SUCCESS;
+    }
+
     static int compare(const CommandLineOptions& options)
     {
         auto file1 = fs::u8path(options.path);
@@ -272,6 +306,8 @@ namespace OpenLoco
                 return simulate(options);
             case CommandLineAction::compare:
                 return compare(options);
+            case CommandLineAction::gensave:
+                return gensave(options);
             default:
                 return std::nullopt;
         }

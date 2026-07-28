@@ -150,6 +150,10 @@ namespace OpenLoco::ScenarioManager
     {
         ScenarioFolderState currentState;
         const auto scenarioPath = Environment::getPathNoWarning(Environment::PathId::scenarios);
+        if (!fs::exists(scenarioPath))
+        {
+            return currentState;
+        }
         for (const auto& file : fs::directory_iterator(scenarioPath, fs::directory_options::skip_permission_denied))
         {
             if (!file.is_regular_file())
@@ -186,8 +190,13 @@ namespace OpenLoco::ScenarioManager
 
         const auto scenarioListSize = _scenarioHeader.numScenarios * sizeof(ScenarioIndexEntry);
         _scenarioList.clear();
-        _scenarioList.resize(_scenarioHeader.numScenarios);
-        if (_scenarioList.empty())
+        try
+        {
+            // NB: numScenarios may legitimately be zero (e.g. no scenario files installed),
+            // which is not itself an allocation failure.
+            _scenarioList.resize(_scenarioHeader.numScenarios);
+        }
+        catch (const std::bad_alloc&)
         {
             exitWithError(StringIds::unable_to_allocate_enough_memory, StringIds::game_init_failure);
             return false;
@@ -302,23 +311,27 @@ namespace OpenLoco::ScenarioManager
         }
 
         const auto scenarioPath = Environment::getPathNoWarning(Environment::PathId::scenarios);
+        const bool scenarioPathExists = fs::exists(scenarioPath);
         auto numScenariosDetected = 0;
-        for (const auto& file : fs::directory_iterator(scenarioPath, fs::directory_options::skip_permission_denied))
+        if (scenarioPathExists)
         {
-            if (!file.is_regular_file())
+            for (const auto& file : fs::directory_iterator(scenarioPath, fs::directory_options::skip_permission_denied))
             {
-                continue;
-            }
-            if (!Utility::iequals(file.path().extension().u8string(), ".sc5"))
-            {
-                continue;
-            }
+                if (!file.is_regular_file())
+                {
+                    continue;
+                }
+                if (!Utility::iequals(file.path().extension().u8string(), ".sc5"))
+                {
+                    continue;
+                }
 
-            numScenariosDetected++;
+                numScenariosDetected++;
+            }
         }
 
         auto currentScenarioOffset = 0;
-        for (const auto& file : fs::directory_iterator(scenarioPath, fs::directory_options::skip_permission_denied))
+        for (const auto& file : scenarioPathExists ? fs::directory_iterator(scenarioPath, fs::directory_options::skip_permission_denied) : fs::directory_iterator{})
         {
             if (!file.is_regular_file())
             {

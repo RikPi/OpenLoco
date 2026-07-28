@@ -112,14 +112,19 @@ namespace OpenLoco::S5
     {
         auto saveDetails = std::make_unique<SaveDetails>();
 
-        const auto& playerCompany = gameState.companies[enumValue(gameState.playerCompanies[0])];
-        StringManager::formatString(saveDetails->company, sizeof(saveDetails->company), playerCompany.name);
-        StringManager::formatString(saveDetails->owner, sizeof(saveDetails->owner), playerCompany.ownerName);
+        // A game state may legitimately have no player company (e.g. a headless
+        // game state generated without any competitor objects to create one from).
+        if (gameState.playerCompanies[0] != CompanyId::null)
+        {
+            const auto& playerCompany = gameState.companies[enumValue(gameState.playerCompanies[0])];
+            StringManager::formatString(saveDetails->company, sizeof(saveDetails->company), playerCompany.name);
+            StringManager::formatString(saveDetails->owner, sizeof(saveDetails->owner), playerCompany.ownerName);
+            saveDetails->performanceIndex = playerCompany.performanceIndex;
+            saveDetails->challengeProgress = playerCompany.challengeProgress;
+            saveDetails->challengeFlags = playerCompany.challengeFlags;
+        }
 
         saveDetails->date = gameState.currentDay;
-        saveDetails->performanceIndex = playerCompany.performanceIndex;
-        saveDetails->challengeProgress = playerCompany.challengeProgress;
-        saveDetails->challengeFlags = playerCompany.challengeFlags;
 
         std::strncpy(saveDetails->scenario, gameState.scenarioName, sizeof(saveDetails->scenario));
         Scenario::drawSavePreviewImage(saveDetails->image, { 250, 200 });

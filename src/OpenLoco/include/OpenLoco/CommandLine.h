@@ -15,6 +15,7 @@ namespace OpenLoco
         uncompress,
         simulate,
         compare,
+        gensave,
         help,
         version,
         intro,
@@ -33,6 +34,7 @@ namespace OpenLoco
         std::string logLevels;
         std::string all;
         std::optional<std::string> locomotionDataPath{};
+        std::optional<uint32_t> seed{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);
