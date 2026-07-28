@@ -138,6 +138,49 @@ TEST(CommandSerializationTests, wirePacketRoundTrip)
     EXPECT_EQ(decodedArgs.corner, args.corner);
 }
 
+TEST(CommandSerializationTests, renameChunkRoundTrip)
+{
+    // All six rename commands share the chunk codec; exercise it via renameTown
+    registers original;
+    original.cx = 7;    // town id
+    original.ax = 2;    // chunk index
+    const char chunk[12] = { 'T', 'e', 's', 't', 'v', 'i', 'l', 'l', 'e', '\0', 'A', 'B' };
+    std::memcpy(&original.edx, chunk, 4);
+    std::memcpy(&original.ebp, chunk + 4, 4);
+    std::memcpy(&original.edi, chunk + 8, 4);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::renameTown, original, ms));
+    EXPECT_EQ(ms.getLength(), 16u); // id(2) + index(2) + chunk(12)
+
+    ms.setPosition(0);
+    registers decoded;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::renameTown, ms, decoded));
+
+    EXPECT_EQ(decoded.cx, original.cx);
+    EXPECT_EQ(decoded.ax, original.ax);
+    char decodedChunk[12];
+    std::memcpy(decodedChunk, &decoded.edx, 4);
+    std::memcpy(decodedChunk + 4, &decoded.ebp, 4);
+    std::memcpy(decodedChunk + 8, &decoded.edi, 4);
+    EXPECT_EQ(0, std::memcmp(chunk, decodedChunk, sizeof(chunk)));
+}
+
+TEST(CommandSerializationTests, charArrayRoundTrip)
+{
+    MemoryStream ms;
+    ArgsWriter writer(ms);
+    char name[8] = { 'L', 'o', 'c', 'o', '\0', 'x', 'y', 'z' };
+    writer(name);
+    ASSERT_EQ(ms.getLength(), 8u);
+
+    ms.setPosition(0);
+    ArgsReader reader(ms);
+    char decoded[8]{};
+    reader(decoded);
+    EXPECT_EQ(0, std::memcmp(name, decoded, sizeof(name)));
+}
+
 TEST(CommandSerializationTests, malformedPacketIsRejected)
 {
     Network::GameCommandPacket packet;

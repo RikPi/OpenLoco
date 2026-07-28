@@ -69,6 +69,10 @@ namespace OpenLoco::GameCommands
                 writeInt(value.y);
                 writeInt(value.z);
             }
+            else if constexpr (std::is_bounded_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>)
+            {
+                _stream.write(value, sizeof(T));
+            }
             else
             {
                 static_assert(sizeof(T) == 0, "No serialization defined for this field type");
@@ -130,6 +134,10 @@ namespace OpenLoco::GameCommands
                 value.x = readInt<decltype(value.x)>();
                 value.y = readInt<decltype(value.y)>();
                 value.z = readInt<decltype(value.z)>();
+            }
+            else if constexpr (std::is_bounded_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>)
+            {
+                _stream.read(value, sizeof(T));
             }
             else
             {

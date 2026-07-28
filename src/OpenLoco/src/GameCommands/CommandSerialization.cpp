@@ -68,6 +68,7 @@
 #include "GameCommands/Vehicles/VehicleSpeedControl.h"
 #include "Logging.h"
 #include <array>
+#include <cstring>
 
 using namespace OpenLoco::Diagnostics;
 
@@ -533,6 +534,46 @@ namespace OpenLoco::GameCommands
         return true;
     }
 
+    // The six rename commands share vanilla's chunked-name protocol: cx is the
+    // target id, ax the chunk index, and edx/ebp/edi carry 12 bytes of the
+    // name. Their Args structs are asymmetric (the registers constructor
+    // stores the incoming chunk at the start of the buffer, while
+    // operator registers() extracts the chunk from a fully populated name
+    // buffer), so they cannot round-trip through the generic typed codec.
+    // Serialize the chunk protocol explicitly instead: id and index as
+    // integers, the chunk as raw bytes (portable regardless of host layout).
+    static bool encodeRenameChunk(const registers& regs, Stream& stream)
+    {
+        ArgsWriter ar(stream);
+        auto id = static_cast<uint16_t>(regs.cx);
+        auto chunkIndex = static_cast<uint16_t>(regs.ax);
+        ar(id, chunkIndex);
+
+        uint8_t chunk[12];
+        std::memcpy(chunk, &regs.edx, 4);
+        std::memcpy(chunk + 4, &regs.ebp, 4);
+        std::memcpy(chunk + 8, &regs.edi, 4);
+        stream.write(chunk, sizeof(chunk));
+        return true;
+    }
+
+    static bool decodeRenameChunk(Stream& stream, registers& regs)
+    {
+        ArgsReader ar(stream);
+        uint16_t id{};
+        uint16_t chunkIndex{};
+        ar(id, chunkIndex);
+        regs.cx = static_cast<int16_t>(id);
+        regs.ax = static_cast<int16_t>(chunkIndex);
+
+        uint8_t chunk[12];
+        stream.read(chunk, sizeof(chunk));
+        std::memcpy(&regs.edx, chunk, 4);
+        std::memcpy(&regs.ebp, chunk + 4, 4);
+        std::memcpy(&regs.edi, chunk + 8, 4);
+        return true;
+    }
+
     static constexpr size_t kNumGameCommands = 85;
 
     template<typename TArgs>
@@ -618,6 +659,14 @@ namespace OpenLoco::GameCommands
         table[static_cast<size_t>(GameCommand::cheat)] = makeTypedCodec<GenericCheatArgs>();
         table[static_cast<size_t>(GameCommand::setGameSpeed)] = makeTypedCodec<SetGameSpeedArgs>();
         table[static_cast<size_t>(GameCommand::vehicleOrderReverse)] = makeTypedCodec<VehicleOrderReverseArgs>();
+
+        constexpr CommandCodec kRenameChunkCodec{ encodeRenameChunk, decodeRenameChunk };
+        table[static_cast<size_t>(GameCommand::vehicleRename)] = kRenameChunkCodec;
+        table[static_cast<size_t>(GameCommand::changeStationName)] = kRenameChunkCodec;
+        table[static_cast<size_t>(GameCommand::changeCompanyName)] = kRenameChunkCodec;
+        table[static_cast<size_t>(GameCommand::changeCompanyOwnerName)] = kRenameChunkCodec;
+        table[static_cast<size_t>(GameCommand::renameTown)] = kRenameChunkCodec;
+        table[static_cast<size_t>(GameCommand::renameIndustry)] = kRenameChunkCodec;
 
         return table;
     }
