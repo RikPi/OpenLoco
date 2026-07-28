@@ -281,6 +281,13 @@ namespace OpenLoco::GameCommands
     uint8_t getCommandNestLevel();
     void resetCommandNestLevel();
 
+    // True while the deterministic part of a game tick is executing
+    // (replicated command replay and subsystem updates). Commands issued in
+    // that window (e.g. by company AI) run identically on every peer already,
+    // so they are applied inline instead of being queued over the network.
+    bool isInTickExecution();
+    void setInTickExecution(bool inTick);
+
     // TODO: rework these
     struct LegacyReturnState
     {

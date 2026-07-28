@@ -228,13 +228,14 @@ namespace OpenLoco::CompanyManager
             auto company = get(id);
             if (company != nullptr && !isPlayerCompany(id) && !company->empty())
             {
-                // Only the host should update AI, AI will run game commands
-                // which will be sent to all the clients
-                if (!SceneManager::isNetworked() || SceneManager::isNetworkHost())
-                {
-                    GameCommands::setUpdatingCompanyId(id);
-                    aiThink(id);
-                }
+                // Every peer runs the AI: it is deterministic (driven by the
+                // synced PRNG and game state), and it mutates company state
+                // directly, so running it host-only would desync clients.
+                // AI-issued game commands apply inline during the tick on all
+                // peers (see the in-tick-execution bypass in doCommand)
+                // rather than being queued over the network.
+                GameCommands::setUpdatingCompanyId(id);
+                aiThink(id);
             }
 
             getGameState().produceAICompanyTimeout++;
@@ -790,6 +791,12 @@ namespace OpenLoco::CompanyManager
     void updatePlayerInfrastructureOptions()
     {
         auto* playerCompany = getPlayerCompany();
+        if (playerCompany == nullptr)
+        {
+            // No player company exists yet (e.g. a headless game state generated
+            // without any competitor objects available to create one from).
+            return;
+        }
         auto& gameState = getGameState();
         auto roadType = gameState.lastTrackTypeOption | (1U << 7);
         if (roadType == 0xFFU)

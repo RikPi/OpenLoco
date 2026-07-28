@@ -237,6 +237,18 @@ namespace OpenLoco::GameCommands
     static uint32_t loc_4314EA(const uint8_t flags);
     static uint32_t loc_4313C6(int esi, const registers& regs, const uint8_t flags);
 
+    static bool _inTickExecution = false;
+
+    bool isInTickExecution()
+    {
+        return _inTickExecution;
+    }
+
+    void setInTickExecution(bool inTick)
+    {
+        _inTickExecution = inTick;
+    }
+
     static bool commandRequiresUnpausingGame(GameCommand command, uint16_t flags)
     {
         if ((flags & (Flags::aiAllocated | Flags::ghost)) != 0)
@@ -270,7 +282,7 @@ namespace OpenLoco::GameCommands
         }
 
         auto isGhost = (flags & Flags::ghost) != 0;
-        if (!isGhost && Network::isConnected())
+        if (!isGhost && !_inTickExecution && Network::isConnected())
         {
             // For network games, we need to delay the command apply processing
             // Just return the result without applying for now

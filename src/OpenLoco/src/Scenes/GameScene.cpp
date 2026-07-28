@@ -6,6 +6,7 @@
 #include "Effects/EffectsManager.h"
 #include "Environment.h"
 #include "Game.h"
+#include "GameCommands/GameCommands.h"
 #include "GameState.h"
 #include "GameStateFlags.h"
 #include "Localisation/StringIds.h"
@@ -218,6 +219,11 @@ namespace OpenLoco::Scenes::GameScene
 
         ScenarioManager::setScenarioTicks(ScenarioManager::getScenarioTicks() + 1);
         ScenarioManager::setScenarioTicks2(ScenarioManager::getScenarioTicks2() + 1);
+
+        // Commands issued from here to the end of the tick (replicated command
+        // replay, AI) execute deterministically on every peer and must apply
+        // inline rather than being queued over the network again.
+        GameCommands::setInTickExecution(true);
         Network::processGameCommands(ScenarioManager::getScenarioTicks());
 
         recordTickStartPrng();
@@ -239,6 +245,8 @@ namespace OpenLoco::Scenes::GameScene
         Audio::tick();
 
         Scenario::getOptions().madeAnyChanges = userMadeAnyChanges;
+
+        GameCommands::setInTickExecution(false);
 
         auto& lastLoadError = S5::getLastLoadError();
         if (lastLoadError.errorCode != 0)
