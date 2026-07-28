@@ -13,6 +13,7 @@ using namespace OpenLoco::Diagnostics;
 namespace OpenLoco::Scenes::BootScene
 {
     static bool _introStarted;
+    static bool _launched;
 
     bool loadFile(const fs::path& path)
     {
@@ -76,6 +77,16 @@ namespace OpenLoco::Scenes::BootScene
             SceneManager::requestScene(SceneManager::SceneId::intro);
             return;
         }
+
+        // host/join only request a scene transition once their (possibly asynchronous)
+        // network setup completes, so this must only run once - otherwise every tick
+        // spent waiting (e.g. for a join to receive its state) would re-invoke
+        // Network::openServer()/joinServer() and tear down the connection being made.
+        if (_launched)
+        {
+            return;
+        }
+        _launched = true;
 
         if (!launchGameFromCmdLineOptions())
         {

@@ -307,7 +307,8 @@ namespace OpenLoco
                           .registerOption("--log_levels", 1)
                           .registerOption("--all", "-a")
                           .registerOption("--locomotion_path", 1)
-                          .registerOption("--seed", 1);
+                          .registerOption("--seed", 1)
+                          .registerOption("--headless");
 
         if (!parser.parse())
         {
@@ -405,6 +406,8 @@ namespace OpenLoco
         {
             options.seed = parser.getArg<uint32_t>("--seed");
         }
+
+        options.headless = parser.hasOption("--headless");
 
         return options;
     }

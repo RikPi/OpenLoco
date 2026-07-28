@@ -55,6 +55,8 @@ namespace OpenLoco
         std::cout << "--locomotion_path           Overrides the path to Locomotion install." << std::endl;
         std::cout << "--seed                      Seed for gensave; the same seed always produces" << std::endl;
         std::cout << "                            a byte-identical save." << std::endl;
+        std::cout << "--headless                  Run without creating a window or initialising audio." << std::endl;
+        std::cout << "                            Intended for host/join servers running without a display." << std::endl;
     }
 
     static int uncompressFile(const CommandLineOptions& options)
@@ -276,17 +278,33 @@ namespace OpenLoco
     static void run()
     {
         auto& cfg = Config::get();
+        const bool headless = getCommandLineOptions().headless;
 
-        // Window creation must be done before Gfx can be initialized.
-        Ui::createWindow(cfg.display);
-        Ui::initialiseCursors();
-        Audio::initialiseDSound();
+        if (!headless)
+        {
+            // Window creation must be done before Gfx can be initialized.
+            Ui::createWindow(cfg.display);
+            Ui::initialiseCursors();
+            Audio::initialiseDSound();
+        }
 
         initialise();
 
-        while (Input::processMessages())
+        if (headless)
         {
-            update();
+            // There is no window, so there are no SDL events to pump; the tick loop runs
+            // until the process is terminated (e.g. by the host/join session ending).
+            while (true)
+            {
+                update();
+            }
+        }
+        else
+        {
+            while (Input::processMessages())
+            {
+                update();
+            }
         }
     }
 

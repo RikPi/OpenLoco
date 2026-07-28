@@ -35,6 +35,7 @@ namespace OpenLoco
         std::string all;
         std::optional<std::string> locomotionDataPath{};
         std::optional<uint32_t> seed{};
+        bool headless{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

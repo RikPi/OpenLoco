@@ -22,6 +22,7 @@
 #endif
 
 #include "Audio/Audio.h"
+#include "CommandLine.h"
 #include "Config.h"
 #include "Entities/EntityManager.h"
 #include "Entities/EntityTweener.h"
@@ -97,9 +98,14 @@ namespace OpenLoco
     // 0x004BE65E
     [[noreturn]] void exitCleanly()
     {
-        Audio::close();
-        Audio::disposeDSound();
-        Ui::disposeCursors();
+        // Headless sessions never open an audio device or window/cursors, so there is
+        // nothing to tear down here (see run() in Main.cpp).
+        if (!getCommandLineOptions().headless)
+        {
+            Audio::close();
+            Audio::disposeDSound();
+            Ui::disposeCursors();
+        }
         Localisation::unloadLanguageFile();
 
         auto tempFilePath = Environment::getPathNoWarning(Environment::PathId::_1tmp);

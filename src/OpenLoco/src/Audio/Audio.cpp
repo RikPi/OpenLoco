@@ -1,6 +1,7 @@
 #include "Audio/Audio.h"
 #include "Audio/AmbientAudio.h"
 #include "Audio/VehicleAudio.h"
+#include "CommandLine.h"
 #include "Config.h"
 #include "Environment.h"
 #include "Localisation/StringIds.h"
@@ -467,7 +468,7 @@ namespace OpenLoco::Audio
 
     void playSound(SoundId id, ChannelId channel, const World::Pos3& loc, int32_t volume, int32_t pan, int32_t frequency)
     {
-        if (!_audioIsEnabled)
+        if (!isAudioEnabled())
         {
             return;
         }
@@ -543,6 +544,11 @@ namespace OpenLoco::Audio
 
     AudioHandle play(SoundId id, ChannelId channel, const AudioAttributes& attribs)
     {
+        if (!isAudioEnabled())
+        {
+            return AudioHandle::null;
+        }
+
         auto buffer = getSoundBuffer(id);
         if (!buffer)
         {
@@ -571,6 +577,8 @@ namespace OpenLoco::Audio
 
     bool isAudioEnabled()
     {
-        return _audioIsEnabled;
+        // Headless sessions never open an audio device (see initialiseDSound), so all
+        // sound/music playback must be suppressed at this single choke point.
+        return _audioIsEnabled && !getCommandLineOptions().headless;
     }
 }

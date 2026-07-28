@@ -11,6 +11,7 @@
 #undef small
 #endif
 
+#include "CommandLine.h"
 #include "Config.h"
 #include "Game.h"
 #include "GameCommands/GameCommands.h"
@@ -545,6 +546,13 @@ namespace OpenLoco::Ui
 
     void showMessageBox(const std::string& title, const std::string& message)
     {
+        // A native message box would block waiting for user input; headless sessions have
+        // no user to click it, so log instead.
+        if (getCommandLineOptions().headless)
+        {
+            Logging::error("{}: {}", title, message);
+            return;
+        }
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, title.c_str(), message.c_str(), _window);
     }
 
