@@ -200,7 +200,7 @@ namespace OpenLoco::Gfx::PaletteMap
         if (g1Index)
         {
             auto g1 = getG1Element(*g1Index);
-            if (g1 != nullptr)
+            if (g1 != nullptr && g1->offset != nullptr && g1->width > 0 && g1->height > 0)
             {
                 const size_t length = g1->width * g1->height;
 

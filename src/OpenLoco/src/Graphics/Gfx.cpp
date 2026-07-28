@@ -372,6 +372,10 @@ namespace OpenLoco::Gfx
     void loadDefaultPalette()
     {
         auto* g1Palette = getG1Element(ImageIds::default_palette);
+        if (g1Palette == nullptr)
+        {
+            return;
+        }
         uint8_t* colourData = g1Palette->offset;
         for (auto i = g1Palette->xOffset; i < g1Palette->width + g1Palette->xOffset; ++i)
         {
