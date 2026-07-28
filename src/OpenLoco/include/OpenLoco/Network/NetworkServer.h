@@ -15,6 +15,11 @@ namespace OpenLoco::Network
         client_id_t id{};
         std::unique_ptr<NetworkConnection> connection;
         std::string name;
+
+        // Company this client is allowed to act as. null = spectator (no
+        // commands accepted). Assigned by the server during the join flow;
+        // never trusted from the wire.
+        CompanyId company{ CompanyId::null };
     };
 
     struct ChatMessage

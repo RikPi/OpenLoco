@@ -215,7 +215,17 @@ void NetworkServer::onReceiveGameCommandPacket(Client& client, const GameCommand
         Logging::error("Dropping malformed game command packet from client '{}'", client.name);
         return;
     }
-    queueGameCommand(command.company, command.regs, command.flags);
+
+    if (client.company == CompanyId::null)
+    {
+        // Spectators (and clients not yet assigned a company) cannot act
+        Logging::warn("Dropping game command {} from spectator client '{}'", static_cast<uint32_t>(command.command), client.name);
+        return;
+    }
+
+    // The company a command acts as is decided by the server's assignment,
+    // never by what the client put on the wire
+    queueGameCommand(client.company, command.regs, command.flags);
 }
 
 void NetworkServer::onReceiveDesyncReportPacket(Client& client, const DesyncReportPacket& packet)
