@@ -243,6 +243,8 @@ namespace OpenLoco::Ui::Windows::TimePanel
 
     void beginSendChatMessage(Window& self)
     {
+        Chat::open();
+
         const auto* opponent = CompanyManager::getOpponent();
         auto args = FormatArguments::common();
         args.push(opponent->name);

@@ -136,6 +136,12 @@ namespace OpenLoco::Ui::Windows
         void sub_4B92A5(Ui::Window* window);
     }
 
+    namespace Chat
+    {
+        Window* open();
+        void addMessage(uint32_t clientId, std::string_view message);
+    }
+
     namespace Cheats
     {
         Window* open();

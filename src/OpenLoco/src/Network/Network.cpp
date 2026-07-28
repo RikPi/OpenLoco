@@ -12,6 +12,7 @@
 #include "S5/S5.h"
 #include "Scenario/ScenarioManager.h"
 #include "SceneManager.h"
+#include "Ui/WindowManager.h"
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Core/FileStream.h>
 #include <OpenLoco/Core/MemoryStream.h>
@@ -185,6 +186,7 @@ namespace OpenLoco::Network
     void receiveChatMessage(client_id_t client, std::string_view message)
     {
         Logging::info("Player #{}: {}", static_cast<int>(client), message);
+        Ui::Windows::Chat::addMessage(static_cast<uint32_t>(client), message);
     }
 
     void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)

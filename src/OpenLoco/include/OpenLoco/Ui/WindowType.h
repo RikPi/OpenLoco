@@ -45,6 +45,7 @@ namespace OpenLoco::Ui
         industryList = 35,
         news = 36,
         messages = 37,
+        chat = 38,
 
         multiplayer = 39,
         options = 40,

@@ -296,6 +296,7 @@ set(OLOCO_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/About.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/AboutMusic.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/BuildVehicle.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/Chat.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/Cheats.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/CompanyFaceSelection.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/CompanyList.cpp"
