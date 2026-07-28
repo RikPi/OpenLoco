@@ -41,6 +41,7 @@ set(OLOCO_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/CompanyAi/AiTrackReplacement.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/Docks/CreatePort.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/Docks/RemovePort.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/CommandSerialization.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/GameCommands.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/General/LoadSaveQuit.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/GameCommands/General/RenameStation.cpp"
@@ -425,6 +426,7 @@ set(OLOCO_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/CompanyAi/AiCreateRoadAndStation.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/Docks/CreatePort.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/Docks/RemovePort.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/CommandSerialization.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/GameCommands.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/General/LoadSaveQuit.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/OpenLoco/GameCommands/General/RenameStation.h"
@@ -768,6 +770,7 @@ set(private_compile_definitions
 )
 
 set(test_files
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/CommandSerializationTests.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/TileManagerTests.cpp"
 )
 

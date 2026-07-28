@@ -4,6 +4,7 @@
 #include "NetworkBase.h"
 #include "Socket.h"
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <span>
 #include <vector>
@@ -19,6 +20,7 @@ namespace OpenLoco::Network
         connectedSuccessfully,
         waitingForState,
         connected,
+        resyncing,
         closed,
     };
 
@@ -33,7 +35,7 @@ namespace OpenLoco::Network
         uint32_t _serverGameCommandIndex;
         uint32_t _localTick;
         uint32_t _serverTick;
-        std::list<GameCommandPacket> _receivedGameCommands;
+        std::list<QueuedGameCommand> _receivedGameCommands;
 
         struct ReceivedChunk
         {
@@ -47,6 +49,17 @@ namespace OpenLoco::Network
         std::vector<ReceivedChunk> _requestStateChunksReceived;
         uint32_t _requestStateReceivedBytes{};
         uint32_t _requestStateReceivedChunks{};
+
+        // PRNG state recorded after each fully simulated tick, used to verify
+        // the server's advertised PRNG state for that tick (desync detection).
+        struct TickRngState
+        {
+            uint32_t tick{};
+            uint32_t srand0{};
+            uint32_t srand1{};
+        };
+        std::deque<TickRngState> _tickRngHistory;
+        std::deque<PingPacket> _pendingServerStates;
 
         void onCancel();
         void processReceivedPackets();
@@ -70,6 +83,10 @@ namespace OpenLoco::Network
         void receivePingPacket(const PingPacket& packet);
         void receiveGameCommandPacket(const GameCommandPacket& packet);
 
+        void checkForDesync();
+        void onDesyncDetected(const PingPacket& serverState, const TickRngState& localState);
+        void beginResync();
+
     protected:
         void onClose() override;
         void onUpdate() override;
@@ -87,5 +104,6 @@ namespace OpenLoco::Network
 
         bool shouldProcessTick(uint32_t tick) const;
         void runGameCommandsForTick(uint32_t tick);
+        void onTickProcessed(uint32_t tick);
     };
 }

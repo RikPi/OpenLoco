@@ -255,6 +255,10 @@ namespace OpenLoco::Scenes::GameScene
             }
             S5::resetLastLoadError();
         }
+
+        // The tick has fully simulated; on a network client this records the
+        // PRNG state for this tick so it can be verified against the server's
+        Network::onTickProcessed(ScenarioManager::getScenarioTicks());
     }
 
     void tickInterface()

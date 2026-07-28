@@ -35,7 +35,7 @@ namespace OpenLoco::Network
         client_id_t _nextClientId = 1;
         uint32_t _lastPing{};
         uint32_t _gameCommandIndex{};
-        std::queue<GameCommandPacket> _gameCommands;
+        std::queue<QueuedGameCommand> _gameCommands;
 
         Client* findClient(const INetworkEndpoint& endpoint);
         void createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet);
@@ -43,6 +43,7 @@ namespace OpenLoco::Network
         void onReceiveStateRequestPacket(Client& client, const RequestStatePacket& packet);
         void onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet);
         void onReceiveGameCommandPacket(Client& client, const GameCommandPacket& packet);
+        void onReceiveDesyncReportPacket(Client& client, const DesyncReportPacket& packet);
         void removedTimedOutClients();
         void sendPings();
         void sendChatMessages();
@@ -69,7 +70,7 @@ namespace OpenLoco::Network
 
         void listen(const std::string& bind, port_t port);
         void sendChatMessage(std::string_view message) override;
-        void sendGameCommand(uint32_t index, uint32_t tick, CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags);
+        void sendGameCommand(const QueuedGameCommand& command);
 
         void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags);
         void runGameCommands();

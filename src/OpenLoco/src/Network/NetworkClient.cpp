@@ -1,6 +1,7 @@
 #include "Network/NetworkClient.h"
 #include "Config.h"
 #include "GameCommands/GameCommands.h"
+#include "GameState.h"
 #include "Logging.h"
 #include "Network/NetworkConnection.h"
 #include "S5/S5.h"
@@ -8,6 +9,8 @@
 #include "Ui/WindowManager.h"
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Platform/Platform.h>
+#include <algorithm>
+#include <cstring>
 
 using namespace OpenLoco;
 using namespace OpenLoco::Network;
@@ -208,6 +211,12 @@ void NetworkClient::receiveConnectionResponsePacket(const ConnectResponsePacket&
     }
     else
     {
+        auto message = std::string_view(response.message, strnlen(response.message, sizeof(response.message)));
+        Logging::error("Server rejected connection: {}", message);
+        endStatus(message.empty() ? "Server rejected connection" : std::string(message));
+        // Skip the generic "failed to connect" status from the connecting-state
+        // close path; the rejection reason above is more useful
+        _status = NetworkClientStatus::closed;
         close();
     }
 }
@@ -264,6 +273,14 @@ void NetworkClient::processFullState(std::span<uint8_t const> fullData)
     auto* extra = reinterpret_cast<const ExtraState*>(fullData.data() + fullData.size() - sizeof(ExtraState));
     _localGameCommandIndex = extra->gameCommandIndex;
     _localTick = extra->tick;
+
+    // Any commands received while the state transfer was in flight that are
+    // already part of the snapshot must not be executed again. Recorded RNG
+    // history predating the snapshot is likewise meaningless now.
+    _receivedGameCommands.remove_if([this](const QueuedGameCommand& c) { return c.index <= _localGameCommandIndex; });
+    _tickRngHistory.clear();
+    _pendingServerStates.clear();
+
     updateLocalTick();
 
     BinaryStream bs(fullData.data(), fullData.size() - sizeof(ExtraState));
@@ -294,16 +311,122 @@ void NetworkClient::receivePingPacket(const PingPacket& packet)
         // No pending game commands, we can update to this tick
         _localTick = packet.tick;
     }
+
+    // Queue the server's advertised PRNG state for verification once we have
+    // simulated the tick it refers to
+    _pendingServerStates.push_back(packet);
+    checkForDesync();
+}
+
+void NetworkClient::onTickProcessed(uint32_t tick)
+{
+    if (_status != NetworkClientStatus::connected)
+    {
+        return;
+    }
+
+    // The server samples its PRNG state between ticks, so the state recorded
+    // here (after the tick has fully simulated) is directly comparable
+    constexpr size_t kMaxTickRngHistory = 4096;
+
+    auto& gameState = getGameState();
+    _tickRngHistory.push_back({ tick, gameState.rng.srand_0(), gameState.rng.srand_1() });
+    while (_tickRngHistory.size() > kMaxTickRngHistory)
+    {
+        _tickRngHistory.pop_front();
+    }
+
+    checkForDesync();
+}
+
+void NetworkClient::checkForDesync()
+{
+    while (!_pendingServerStates.empty())
+    {
+        const auto& serverState = _pendingServerStates.front();
+        if (_tickRngHistory.empty() || serverState.tick > _tickRngHistory.back().tick)
+        {
+            // We have not simulated this tick yet; verify once we have
+            break;
+        }
+
+        // History is ordered by tick
+        auto it = std::lower_bound(
+            _tickRngHistory.begin(),
+            _tickRngHistory.end(),
+            serverState.tick,
+            [](const TickRngState& entry, uint32_t tick) { return entry.tick < tick; });
+        if (it != _tickRngHistory.end() && it->tick == serverState.tick)
+        {
+            if (it->srand0 != serverState.srand0 || it->srand1 != serverState.srand1)
+            {
+                onDesyncDetected(serverState, *it);
+                return;
+            }
+
+            // Verified in sync at this tick; older history is no longer needed
+            _tickRngHistory.erase(_tickRngHistory.begin(), it);
+        }
+
+        _pendingServerStates.pop_front();
+    }
+}
+
+void NetworkClient::onDesyncDetected(const PingPacket& serverState, const TickRngState& localState)
+{
+    Logging::error(
+        "Desync detected at tick {}: server rng = {:08X}/{:08X}, local rng = {:08X}/{:08X}",
+        serverState.tick,
+        serverState.srand0,
+        serverState.srand1,
+        localState.srand0,
+        localState.srand1);
+
+    auto currentTick = _tickRngHistory.empty() ? serverState.tick : _tickRngHistory.back().tick;
+    Network::saveDesyncDump("client", serverState.tick, currentTick);
+
+    // Tell the server so it can dump its state for offline comparison
+    if (_serverConnection != nullptr)
+    {
+        DesyncReportPacket report;
+        report.tick = serverState.tick;
+        report.localTick = currentTick;
+        report.srand0 = localState.srand0;
+        report.srand1 = localState.srand1;
+        _serverConnection->sendPacket(report);
+    }
+
+    beginResync();
+}
+
+void NetworkClient::beginResync()
+{
+    Logging::info("Requesting full state resync from server");
+
+    _status = NetworkClientStatus::resyncing;
+    _receivedGameCommands.clear();
+    _tickRngHistory.clear();
+    _pendingServerStates.clear();
+
+    initStatus("Desync detected, resyncing with server...");
+    sendRequestStatePacket();
 }
 
 void NetworkClient::receiveGameCommandPacket(const GameCommandPacket& packet)
 {
+    QueuedGameCommand command;
+    if (!fromWirePacket(packet, command))
+    {
+        Logging::error("Dropping malformed game command packet from server");
+        return;
+    }
+
     // Update the latest knowledge of server state
-    _serverTick = std::max(_serverTick, packet.tick);
-    _serverGameCommandIndex = std::max(_serverGameCommandIndex, packet.index);
+    _serverTick = std::max(_serverTick, command.tick);
+    _serverGameCommandIndex = std::max(_serverGameCommandIndex, command.index);
 
     // Catch old or repeated game command index
-    assert(packet.index > _localGameCommandIndex);
+    assert(command.index > _localGameCommandIndex);
 
     // Insert into ordered game command queue
     for (auto it = _receivedGameCommands.begin(); it != _receivedGameCommands.end(); it++)
@@ -311,15 +434,15 @@ void NetworkClient::receiveGameCommandPacket(const GameCommandPacket& packet)
         auto& p = *it;
 
         // Catch duplicate game command index
-        assert(packet.index != p.index);
+        assert(command.index != p.index);
 
-        if (packet.index <= p.index)
+        if (command.index <= p.index)
         {
-            _receivedGameCommands.insert(it, packet);
+            _receivedGameCommands.insert(it, command);
             return;
         }
     }
-    _receivedGameCommands.push_back(packet);
+    _receivedGameCommands.push_back(command);
 
     updateLocalTick();
 }
@@ -339,10 +462,18 @@ void NetworkClient::sendGameCommand(CompanyId company, const OpenLoco::GameComma
 {
     if (_serverConnection != nullptr && _status == NetworkClientStatus::connected)
     {
+        QueuedGameCommand command;
+        command.company = company;
+        command.flags = flags;
+        command.command = static_cast<GameCommands::GameCommand>(regs.esi);
+        command.regs = regs;
+
         GameCommandPacket packet;
-        packet.company = company;
-        packet.regs = regs;
-        packet.flags = flags;
+        if (!toWirePacket(command, packet))
+        {
+            Logging::error("Unable to serialize game command {} for sending", static_cast<uint32_t>(command.command));
+            return;
+        }
         _serverConnection->sendPacket(packet);
     }
 }
@@ -363,6 +494,13 @@ void NetworkClient::updateLocalTick()
 
 bool NetworkClient::shouldProcessTick(uint32_t tick) const
 {
+    if (_status == NetworkClientStatus::resyncing)
+    {
+        // Freeze the simulation until the fresh state from the server has
+        // been applied; simulating further would only diverge more
+        return false;
+    }
+
     if (_status != NetworkClientStatus::connected)
     {
         return true;
@@ -381,11 +519,11 @@ void NetworkClient::runGameCommandsForTick(uint32_t tick)
     // Execute all following commands if previously received
     while (!_receivedGameCommands.empty())
     {
-        auto& nextPacket = _receivedGameCommands.front();
-        if (nextPacket.index == _localGameCommandIndex + 1 && nextPacket.tick == tick)
+        auto& nextCommand = _receivedGameCommands.front();
+        if (nextCommand.index == _localGameCommandIndex + 1 && nextCommand.tick == tick)
         {
             _localGameCommandIndex++;
-            GameCommands::doCommandForReal(static_cast<GameCommands::GameCommand>(nextPacket.regs.esi), nextPacket.company, nextPacket.regs, nextPacket.flags);
+            GameCommands::doCommandForReal(nextCommand.command, nextCommand.company, nextCommand.regs, nextCommand.flags);
             _receivedGameCommands.pop_front();
         }
         else

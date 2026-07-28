@@ -201,8 +201,8 @@ void NetworkConnection::logPacket([[maybe_unused]] const Packet& packet, [[maybe
     else if (packet.header.kind == PacketKind::gameCommand)
     {
         auto kind = getPacketKindString(packet.header.kind);
-        const auto& gc = packet.Cast<GameCommandPacket>();
-        Logging::info("[{}] #{:04} | {} (Index = {} Tick = {} Command = {})", szDirection, seq, kind, gc->index, gc->tick, gc->regs.esi);
+        const auto* gc = packet.cast<GameCommandPacket>();
+        Logging::info("[{}] #{:04} | {} (Index = {} Tick = {} Command = {})", szDirection, seq, kind, gc->index, gc->tick, gc->commandId);
     }
     else
     {

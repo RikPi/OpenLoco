@@ -24,6 +24,7 @@ namespace OpenLoco::Network
         sendChatMessage,
         receiveChatMessage,
         gameCommand,
+        desyncReport,
     };
 
     struct PacketHeader
@@ -163,16 +164,67 @@ namespace OpenLoco::Network
     };
     static_assert(sizeof(SendChatMessage) <= kMaxPacketDataSize);
 
+    /**
+     * Sent by a client to the server when the client's recorded PRNG state for a
+     * tick does not match the state the server advertised for that tick in a ping.
+     * The server responds by dumping its own game state for offline comparison.
+     */
+    struct DesyncReportPacket
+    {
+        static constexpr PacketKind kind = PacketKind::desyncReport;
+        size_t size() const { return sizeof(DesyncReportPacket); }
+
+        uint32_t tick{};      // tick at which the mismatch was detected
+        uint32_t localTick{}; // tick the client had reached when it noticed
+        uint32_t srand0{};    // client's PRNG state at the mismatching tick
+        uint32_t srand1{};
+    };
+
+    /**
+     * Wire form of a game command. The argument payload is the portable
+     * field-by-field serialization produced by GameCommands::encodeCommandArgs
+     * (little-endian, layout-independent), not a raw registers blob.
+     */
     struct GameCommandPacket
     {
         static constexpr PacketKind kind = PacketKind::gameCommand;
-        size_t size() const { return sizeof(GameCommandPacket); }
+        size_t size() const { return sizeof(GameCommandPacket) - sizeof(data) + dataSize; }
 
         uint32_t index{};
         uint32_t tick{};
         CompanyId company{};
-        OpenLoco::GameCommands::registers regs;
         uint8_t flags{};
+        uint8_t commandId{};
+        uint16_t dataSize{};
+        uint8_t data[kMaxPacketDataSize - 13]{};
     };
+    static_assert(sizeof(GameCommandPacket) == kMaxPacketDataSize);
 #pragma pack(pop)
+
+    /**
+     * In-memory form of a (received or locally queued) game command, with the
+     * arguments unpacked back into the dispatcher's registers representation.
+     */
+    struct QueuedGameCommand
+    {
+        uint32_t index{};
+        uint32_t tick{};
+        CompanyId company{};
+        uint8_t flags{};
+        GameCommands::GameCommand command{};
+        GameCommands::registers regs;
+    };
+
+    /**
+     * Serializes a queued command into a wire packet.
+     * Returns false if the serialized arguments do not fit in a packet.
+     */
+    bool toWirePacket(const QueuedGameCommand& command, GameCommandPacket& packet);
+
+    /**
+     * Parses a wire packet back into a queued command, reconstructing the
+     * registers representation (including esi/bl).
+     * Returns false if the payload is malformed.
+     */
+    bool fromWirePacket(const GameCommandPacket& packet, QueuedGameCommand& command);
 }

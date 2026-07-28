@@ -90,6 +90,21 @@ Client* NetworkServer::findClient(const INetworkEndpoint& endpoint)
 
 void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet)
 {
+    if (packet.version != kNetworkVersion)
+    {
+        Logging::info(
+            "Rejecting client '{}': network version mismatch (client {}, server {})",
+            Utility::nullTerminatedView(packet.name),
+            packet.version,
+            kNetworkVersion);
+
+        ConnectResponsePacket response;
+        response.result = ConnectionResult::error;
+        std::snprintf(response.message, sizeof(response.message), "Network version mismatch (server is on version %u)", kNetworkVersion);
+        conn->sendPacket(response);
+        return;
+    }
+
     auto newClient = std::make_unique<Client>();
     newClient->id = _nextClientId++;
     newClient->connection = std::move(conn);
@@ -138,6 +153,9 @@ void NetworkServer::onReceivePacketFromClient(Client& client, const Packet& pack
             break;
         case PacketKind::gameCommand:
             onReceiveGameCommandPacket(client, *packet.cast<GameCommandPacket>());
+            break;
+        case PacketKind::desyncReport:
+            onReceiveDesyncReportPacket(client, *packet.cast<DesyncReportPacket>());
             break;
         default:
             break;
@@ -189,9 +207,33 @@ void NetworkServer::onReceiveSendChatMessagePacket(Client& client, const SendCha
     _chatMessageQueue.push({ client.id, std::string(packet.getText()) });
 }
 
-void NetworkServer::onReceiveGameCommandPacket([[maybe_unused]] Client& client, const GameCommandPacket& packet)
+void NetworkServer::onReceiveGameCommandPacket(Client& client, const GameCommandPacket& packet)
 {
-    queueGameCommand(packet.company, packet.regs, packet.flags);
+    QueuedGameCommand command;
+    if (!fromWirePacket(packet, command))
+    {
+        Logging::error("Dropping malformed game command packet from client '{}'", client.name);
+        return;
+    }
+    queueGameCommand(command.company, command.regs, command.flags);
+}
+
+void NetworkServer::onReceiveDesyncReportPacket(Client& client, const DesyncReportPacket& packet)
+{
+    auto& gameState = getGameState();
+    Logging::error(
+        "Client '{}' reported a desync at tick {} (client rng = {:08X}/{:08X}, client was at tick {}); server is now at tick {}",
+        client.name,
+        packet.tick,
+        packet.srand0,
+        packet.srand1,
+        packet.localTick,
+        gameState.scenarioTicks);
+
+    // Dump our own state so the two sides can be compared offline. Note the
+    // server has usually simulated past the mismatching tick by the time the
+    // report arrives; the filename records both ticks.
+    Network::saveDesyncDump("server", packet.tick, gameState.scenarioTicks);
 }
 
 void NetworkServer::removedTimedOutClients()
@@ -308,26 +350,27 @@ void NetworkServer::sendChatMessage(std::string_view message)
     _chatMessageQueue.push({ 0, std::string(message) });
 }
 
-void NetworkServer::sendGameCommand(uint32_t index, uint32_t tick, CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)
+void NetworkServer::sendGameCommand(const QueuedGameCommand& command)
 {
     GameCommandPacket packet;
-    packet.index = index;
-    packet.tick = tick;
-    packet.company = company;
-    packet.regs = regs;
-    packet.flags = flags;
+    if (!toWirePacket(command, packet))
+    {
+        Logging::error("Unable to serialize game command {} for broadcast", static_cast<uint32_t>(command.command));
+        return;
+    }
     sendPacketToAll(packet);
 }
 
 void NetworkServer::queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)
 {
-    GameCommandPacket newPacket;
-    newPacket.index = ++_gameCommandIndex;
-    newPacket.tick = 0;
-    newPacket.company = company;
-    newPacket.regs = regs;
-    newPacket.flags = flags;
-    _gameCommands.push(newPacket);
+    QueuedGameCommand command;
+    command.index = ++_gameCommandIndex;
+    command.tick = 0;
+    command.company = company;
+    command.flags = flags;
+    command.command = static_cast<GameCommands::GameCommand>(regs.esi);
+    command.regs = regs;
+    _gameCommands.push(command);
 }
 
 void NetworkServer::runGameCommands()
@@ -339,15 +382,17 @@ void NetworkServer::runGameCommands()
     while (!_gameCommands.empty())
     {
         auto& gc = _gameCommands.front();
+        gc.tick = tick;
 
-        [[maybe_unused]] auto result = GameCommands::doCommandForReal(static_cast<GameCommands::GameCommand>(gc.regs.esi), gc.company, gc.regs, gc.flags);
+        [[maybe_unused]] auto result = GameCommands::doCommandForReal(gc.command, gc.company, gc.regs, gc.flags);
 
-        // TODO We can't do this, we have to send a dummy command to the clients
-        //      otherwise we skip a game command index
-        // if (result != 0x80000000)
-        // {
-        sendGameCommand(gc.index, tick, gc.company, gc.regs, gc.flags);
-        // }
+        // Failed commands are broadcast too: every peer must consume the same
+        // command index sequence, and the deterministic simulation guarantees a
+        // command that failed here fails identically on every client (with no
+        // state mutation, and error UI shown only on the issuing player's
+        // machine). Skipping failed commands would leave a hole in the index
+        // sequence and stall all clients.
+        sendGameCommand(gc);
 
         _gameCommands.pop();
     }

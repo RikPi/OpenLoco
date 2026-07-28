@@ -1,5 +1,7 @@
 #include "Network/Network.h"
 #include "CommandLine.h"
+#include "Environment.h"
+#include "GameCommands/CommandSerialization.h"
 #include "GameCommands/GameCommands.h"
 #include "GameState.h"
 #include "Graphics/Gfx.h"
@@ -7,15 +9,78 @@
 #include "Network/NetworkClient.h"
 #include "Network/NetworkServer.h"
 #include "Network/Socket.h"
+#include "S5/S5.h"
 #include "Scenario/ScenarioManager.h"
 #include "SceneManager.h"
+#include <OpenLoco/Core/BinaryStream.h>
+#include <OpenLoco/Core/FileStream.h>
+#include <OpenLoco/Core/MemoryStream.h>
 #include <cassert>
+#include <cstring>
+#include <fmt/format.h>
 #include <stdexcept>
 
 using namespace OpenLoco::Diagnostics;
 
 namespace OpenLoco::Network
 {
+    bool toWirePacket(const QueuedGameCommand& command, GameCommandPacket& packet)
+    {
+        MemoryStream ms;
+        if (!GameCommands::encodeCommandArgs(command.command, command.regs, ms))
+        {
+            return false;
+        }
+        if (ms.getLength() > sizeof(packet.data))
+        {
+            Logging::error("Serialized game command {} is too large for a packet ({} bytes)", static_cast<uint32_t>(command.command), ms.getLength());
+            return false;
+        }
+
+        packet.index = command.index;
+        packet.tick = command.tick;
+        packet.company = command.company;
+        packet.flags = command.flags;
+        packet.commandId = static_cast<uint8_t>(command.command);
+        packet.dataSize = static_cast<uint16_t>(ms.getLength());
+        std::memcpy(packet.data, ms.data(), ms.getLength());
+        return true;
+    }
+
+    bool fromWirePacket(const GameCommandPacket& packet, QueuedGameCommand& command)
+    {
+        if (packet.dataSize > sizeof(packet.data))
+        {
+            Logging::error("Malformed game command packet: data size {} exceeds packet capacity", packet.dataSize);
+            return false;
+        }
+
+        command.index = packet.index;
+        command.tick = packet.tick;
+        command.company = packet.company;
+        command.flags = packet.flags;
+        command.command = static_cast<GameCommands::GameCommand>(packet.commandId);
+
+        BinaryStream bs(packet.data, packet.dataSize);
+        try
+        {
+            if (!GameCommands::decodeCommandArgs(command.command, bs, command.regs))
+            {
+                return false;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            Logging::error("Malformed game command packet for command {}: {}", packet.commandId, e.what());
+            return false;
+        }
+
+        // Reconstruct the dispatcher's view of command id and flags
+        command.regs.esi = static_cast<int32_t>(command.command);
+        command.regs.bl = command.flags;
+        return true;
+    }
+
     enum class NetworkMode
     {
         none,
@@ -124,12 +189,6 @@ namespace OpenLoco::Network
 
     void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)
     {
-        // TEMP debug code
-        if (regs.esi == 73)
-        {
-            return;
-        }
-
         if (_mode == NetworkMode::server)
         {
             _server->queueGameCommand(company, regs, flags);
@@ -164,6 +223,34 @@ namespace OpenLoco::Network
             case NetworkMode::client:
                 _client->runGameCommandsForTick(tick);
                 break;
+        }
+    }
+
+    void onTickProcessed(uint32_t tick)
+    {
+        if (_mode == NetworkMode::client)
+        {
+            _client->onTickProcessed(tick);
+        }
+    }
+
+    void saveDesyncDump(std::string_view role, uint32_t mismatchTick, uint32_t currentTick)
+    {
+        try
+        {
+            auto directory = Environment::getPath(Environment::PathId::save) / "desync";
+            Environment::autoCreateDirectory(directory);
+
+            auto path = directory / fmt::format("desync_{}_tick{}_at{}.sv5", role, mismatchTick, currentTick);
+            FileStream fs(path, StreamMode::write);
+            S5::exportGameStateToFile(fs, S5::SaveFlags::noWindowClose);
+
+            auto path8 = path.u8string();
+            Logging::info("Saved desync dump to {}", path8.c_str());
+        }
+        catch (const std::exception& e)
+        {
+            Logging::error("Unable to save desync dump: {}", e.what());
         }
     }
 
