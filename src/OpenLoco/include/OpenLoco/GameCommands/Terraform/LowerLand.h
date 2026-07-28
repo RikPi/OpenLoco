@@ -29,8 +29,10 @@ namespace OpenLoco::GameCommands
             registers regs;
             regs.ax = centre.x;
             regs.cx = centre.y;
-            regs.edx = (pointB.x << 16) | pointA.x;
-            regs.ebp = (pointB.y << 16) | pointA.y;
+            // Mask the low halves: sign extension of a negative pointA
+            // coordinate would otherwise bleed into pointB's bits
+            regs.edx = (pointB.x << 16) | (pointA.x & 0xFFFF);
+            regs.ebp = (pointB.y << 16) | (pointA.y & 0xFFFF);
             regs.di = enumValue(corner);
             return regs;
         }

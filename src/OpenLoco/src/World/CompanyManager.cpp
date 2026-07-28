@@ -1013,8 +1013,14 @@ namespace OpenLoco::CompanyManager
             return;
         }
 
-        company->updateCounter += 1;
-        if ((company->updateCounter % 128) != 0)
+        // Throttle how often the owner status game command is issued. This must be
+        // machine-local state: it is driven by the local player's UI every interface
+        // tick, so counting it in Company (synced game state) would make the game
+        // state diverge between multiplayer peers. company->updateCounter is left
+        // untouched and only persists whatever value the save/state snapshot had.
+        static uint32_t ownerStatusThrottle = 0;
+        ownerStatusThrottle += 1;
+        if ((ownerStatusThrottle % 128) != 0)
         {
             return;
         }
