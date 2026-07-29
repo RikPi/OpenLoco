@@ -236,8 +236,9 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
 
 ## Session / environment
 
-- Branch `multiplayer`; `origin` = upstream OpenLoco/OpenLoco (SSH). User
-  has no fork remote yet — do not push until one is added.
+- Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the
+  fork, SSH; push here), `upstream` = OpenLoco/OpenLoco (fetch only —
+  never push). The branch tracks `origin/multiplayer`.
 - User does not own Locomotion (not free; ~€6 GOG/Steam, frequent sales).
 - Commit style: imperative subject, body explains why, trailer
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
