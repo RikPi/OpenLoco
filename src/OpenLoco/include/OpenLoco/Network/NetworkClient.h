@@ -43,6 +43,26 @@ namespace OpenLoco::Network
             std::vector<uint8_t> data;
         };
 
+        // Headless test hook (--test_rename <name>, CommandLine.h): after the
+        // client is assigned a real company, issues a company rename via the
+        // normal doCommand path (outside tick execution, so it round-trips
+        // through the network queue exactly like a UI-issued command) and
+        // later verifies the name landed. See KNOWLEDGEBASE.md § Client
+        // round-trip test hook.
+        enum class TestRenameState
+        {
+            none,
+            assignedWaitingConnected,
+            pendingIssue,
+            pendingVerify,
+            done,
+        };
+        TestRenameState _testRenameState{ TestRenameState::none };
+        uint32_t _testRenameDeadline{};
+        void updateTestRenameHook();
+        void issueTestRenameCommand();
+        void verifyTestRenameCommand();
+
         uint32_t _requestStateCookie{};
         uint32_t _requestStateTotalSize{};
         uint16_t _requestStateNumChunks{};

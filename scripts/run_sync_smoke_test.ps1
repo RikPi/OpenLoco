@@ -9,6 +9,8 @@ client on loopback, lets them run, then asserts from the file logs that:
   - the client reached gameplay (state transfer completed)
   - no [ERR] / desync lines appeared (the desync detector runs continuously)
   - both processes survived the whole window
+  - (with -TestRename, and a company-granting policy) a client-issued game
+    command round-tripped through the server and was applied on the client
 
 Requires: a built tree (windows-release preset), the stub install dir
 (fake-locomotion with Data\g1.DAT), allow_multiple_instances: true in the
@@ -26,14 +28,25 @@ param(
     [string]$JoinPolicy = 'own',
     # Expected assignment outcome: 'company' (client granted a company) or
     # 'spectator'. Default derives from the policy.
-    [string]$Expect = ''
+    [string]$Expect = '',
+    # Exercise the client-issued game command round trip: the client fires a
+    # company rename ~2s after being assigned a real company, then verifies
+    # ~8s later that the name actually changed -- which can only happen via
+    # the full client -> server -> broadcast -> apply round trip, since
+    # clients never apply their own queued commands locally. Only meaningful
+    # when the client is granted a company (own/coop policies); ignored
+    # (and asserted against) for spectator.
+    [switch]$TestRename
 )
 
 $ErrorActionPreference = 'Stop'
 
 if ($Expect -eq '')
 {
-    $Expect = if ($JoinPolicy -eq 'own') { 'company' } else { 'spectator' }
+    # own: freshly created company. coop: the host's (shared) company --
+    # also a "company" outcome, not spectator, per NetworkServer's join
+    # policy handling. spectator: explicit null assignment.
+    $Expect = if ($JoinPolicy -eq 'spectator') { 'spectator' } else { 'company' }
 }
 
 $exe = Join-Path $BuildDir 'OpenLoco.exe'
@@ -66,7 +79,12 @@ try
     Start-Sleep 8
 
     Write-Host 'Starting client...'
+    $testRenameName = 'SyncTest'
     $clientArgs = @('--locomotion_path', $LocomotionPath, '--headless', '--log_levels', 'all', 'join', '127.0.0.1')
+    if ($TestRename)
+    {
+        $clientArgs += @('--test_rename', $testRenameName)
+    }
     $clientProc = Start-Process $exe -ArgumentList $clientArgs -PassThru -NoNewWindow
 
     Write-Host "Running for $RunSeconds seconds..."
@@ -107,6 +125,14 @@ try
         default { Fail "unknown expectation '$Expect'" }
     }
 
+    if ($TestRename -and $Expect -eq 'company')
+    {
+        if (($clientLog | Select-String "[TEST] rename verified: '$testRenameName'" -SimpleMatch).Count -lt 1)
+        {
+            Fail "client-issued rename round trip did not verify (expected `"[TEST] rename verified: '$testRenameName'`" in client log)"
+        }
+    }
+
     $badLines = @($hostLog + $clientLog | Select-String '\[ERR\]|[Dd]esync')
     if ($badLines.Count -gt 0)
     {
@@ -114,7 +140,8 @@ try
         Fail "$($badLines.Count) error/desync line(s) in the logs"
     }
 
-    Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect)" -ForegroundColor Green
+    $renameNote = if ($TestRename -and $Expect -eq 'company') { ', rename round trip verified' } else { '' }
+    Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect$renameNote)" -ForegroundColor Green
     exit 0
 }
 finally

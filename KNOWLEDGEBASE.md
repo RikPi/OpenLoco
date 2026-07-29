@@ -234,6 +234,71 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
 - Upstream CI's determinism test uses two private repos (LocomotionAssets,
   TestData) — unavailable to forks; our gensave path replaces them.
 
+## Client round-trip test hook
+
+- `--test_rename <name>` (`CommandLine.h`/`.cpp`): a hidden test-only CLI
+  option, deliberately absent from `printHelp` (a code comment marks it as a
+  test hook instead). On a joining client it drives a self-verifying
+  round-trip test of a client-issued game command through the whole lockstep
+  pipeline (client `doCommand` → network queue → server orders + broadcasts
+  → both peers apply at the same tick) — the one thing the existing smoke
+  test never exercised (the client only ever *received* commands).
+- Lives in `NetworkClient` as a small state machine
+  (`_testRenameState`: `none` → `assignedWaitingConnected` → `pendingIssue`
+  → `pendingVerify` → `done`), driven from `onUpdate()` — i.e. the
+  main-thread loop *outside* `GameScene::tick()`, so `GameCommands::
+  isInTickExecution()` is false and the issued command takes the normal
+  networked `doCommand` path (queue to server), never a direct `GameState`
+  mutation, satisfying the "don't mutate state outside a command" rule.
+- **Timing bug found and fixed**: arming the 2s-to-issue countdown directly
+  off `receiveCompanyAssignmentPacket` is wrong — that packet routinely
+  arrives *before* the state-transfer chunks finish and `_status` flips to
+  `NetworkClientStatus::connected` (observed ~7s gap between "Assigned
+  company" and "Scene transition: boot -> gameplay" in testing). If the
+  rename is issued while not yet `connected`, `Network::isConnected()` is
+  false, so `GameCommands::doCommand`'s networked branch
+  (`!isGhost && !_inTickExecution && Network::isConnected()`) is skipped and
+  it falls through to `doCommandForReal` — a **local, non-networked apply**.
+  In practice it also had no visible effect (pre-gameplay state), but the
+  real danger is that path bypassing the server entirely, which would prove
+  nothing (or desync a real game). Fix: on assignment, only record
+  `assignedWaitingConnected`; `updateTestRenameHook()` waits for `_status ==
+  connected` before starting the real 2s deadline.
+- **Rename chunk order fact** (learned by reading the two existing call
+  sites, `Ui/Windows/CompanyWindow.cpp`'s `renameCompany` and
+  `CompanyManager.cpp`'s preferred-name setter — both agree): the 36-char
+  name buffer is copied whole into `ChangeCompanyNameArgs::buffer`, then
+  `doCommand` is called **three times with `bufferIndex` in the order 1, 2,
+  0** — not 0, 1, 2. `ChangeCompanyNameArgs::operator registers()` maps
+  bufferIndex → buffer offset via `{24, 0, 12}` (index 0 reads the *last*
+  12 chars), and the server-side command
+  (`GameCommands::changeCompanyName`) maps bufferIndex → reassembly offset
+  via `transformTable = {2, 0, 1}`, only committing the rename when
+  `bufferIndex == 0` arrives (the third call). Getting the order wrong
+  either scrambles the name or (bufferIndex 0 first) commits an
+  empty/garbage name before the other two chunks ever arrive. This already
+  has a dedicated wire codec (`kRenameChunkCodec` /
+  `encodeRenameChunk`/`decodeRenameChunk` in `CommandSerialization.cpp`,
+  shared with `vehicleRename`/`changeStationName`/`changeCompanyOwnerName`/
+  `renameTown`/`renameIndustry`) precisely because the generic typed codec
+  can't round-trip this buffer-offset scheme (see existing note under
+  Determinism traps).
+- The test hook must call `GameCommands::setUpdatingCompanyId(company)`
+  before `doCommand` — `_updatingCompanyId` (not any per-window "current
+  company") is what `queueGameCommand` attributes the command to.
+- Verification reads the company's *actual* current name back out of
+  `GameState` via `StringManager::formatString(buffer, company->name)` (from
+  `Localisation/Formatting.h`, not `Localisation/StringManager.h` — the
+  latter only has the raw string-table primitives; `formatString` lives in
+  `Formatting.h`, same as the rename command's own name-clash check).
+- `scripts\run_sync_smoke_test.ps1` gained `-TestRename` (passes
+  `--test_rename SyncTest` to the client, asserts `[TEST] rename verified:
+  'SyncTest'` in the client log when `-Expect company`). Also fixed the
+  script's default `-Expect` derivation: it previously treated every policy
+  except `own` as `spectator`, which is wrong for `coop` (shares the host's
+  real company via the assignment packet — a `company` outcome, not
+  `spectator`); default is now `spectator` only for `-JoinPolicy spectator`.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the

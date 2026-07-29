@@ -309,7 +309,9 @@ namespace OpenLoco
                           .registerOption("--locomotion_path", 1)
                           .registerOption("--seed", 1)
                           .registerOption("--headless")
-                          .registerOption("--join_policy", 1);
+                          .registerOption("--join_policy", 1)
+                          // Hidden test hook, intentionally not in printHelp/--help.
+                          .registerOption("--test_rename", 1);
 
         if (!parser.parse())
         {
@@ -430,6 +432,11 @@ namespace OpenLoco
                 Logging::error("Unknown --join_policy '{}' (expected own, coop or spectator)", policy);
                 return {};
             }
+        }
+
+        if (parser.hasOption("--test_rename"))
+        {
+            options.testRename = std::string(parser.getArg("--test_rename"));
         }
 
         return options;

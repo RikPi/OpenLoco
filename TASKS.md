@@ -57,9 +57,32 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       `gen_competitor_object.py` emits 8 distinct competitors (a company
       consumes its competitor exclusively, so own-policy joins need spares).
       All three join policies pass the scripted smoke test.
-- [ ] Client-issued in-game command round-trip test (client currently never
-      sends a game command in the smoke test; needs a headless test hook,
-      e.g. a debug flag that fires a command after assignment)
+- [x] Client-issued in-game command round-trip test: hidden `--test_rename
+      <name>` CLI option (`CommandLine.{h,cpp}`, deliberately not in
+      `printHelp`) plus a headless hook in `NetworkClient` (state machine
+      driven from `onUpdate()`, i.e. outside `GameScene::tick()`) that, once
+      the client is assigned a real company and is fully `connected`
+      (`NetworkClientStatus`), issues a company rename via the exact
+      chunked `doCommand` sequence the UI/CompanyManager use (bufferIndex
+      1, 2, 0 — not 0, 1, 2; see KNOWLEDGEBASE.md § Client round-trip test
+      hook) ~2s later, then reads the company's real name back via
+      `StringManager::formatString` ~8s after that and logs `[TEST] rename
+      verified: '<name>'` or `[TEST] rename FAILED: ...`. Since a client
+      never applies its own queued commands locally
+      (`GameCommands::doCommand`'s network branch only queues and returns),
+      a verified line proves the full client -> server -> broadcast ->
+      apply-on-both-peers round trip. `scripts\run_sync_smoke_test.ps1`
+      gained `-TestRename` (asserts the verified line) and a corrected
+      default `-Expect` (coop now defaults to `company`, matching its
+      actual behaviour, not `spectator`). Verified: `own` and `coop`
+      policies both PASS with the verified line; `spectator` (no
+      `-TestRename`) still PASSes; zero `[ERR]`/desync lines; ctest
+      144/144. One bug found and fixed along the way: the naive "arm on
+      `CompanyAssignmentPacket`" design fired the rename before the state
+      transfer finished and `Network::isConnected()` was still false,
+      which made `doCommand` silently take its local-apply fallback
+      instead of queuing to the server — fixed by gating the 2s countdown
+      on `NetworkClientStatus::connected`, not just the assignment packet.
 - [x] Fixture with a minimal custom competitor `.DAT` object, unlocking the
       `createPlayerCompany` success path in the smoke test — hand-crafted
       (`scripts/gen_competitor_object.py`, regeneratable; see KNOWLEDGEBASE.md

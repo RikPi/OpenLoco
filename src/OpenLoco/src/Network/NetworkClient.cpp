@@ -1,8 +1,11 @@
 #include "Network/NetworkClient.h"
+#include "CommandLine.h"
 #include "Config.h"
+#include "GameCommands/Company/RenameCompanyName.h"
 #include "GameCommands/GameCommands.h"
 #include "GameState.h"
 #include "Graphics/Gfx.h"
+#include "Localisation/Formatting.h"
 #include "Logging.h"
 #include "Network/NetworkConnection.h"
 #include "S5/S5.h"
@@ -31,6 +34,129 @@ NetworkClientStatus NetworkClient::getStatus() const
 uint32_t NetworkClient::getLocalTick() const
 {
     return _localTick;
+}
+
+// Headless test hook (--test_rename). Called from onUpdate(), i.e. the
+// main-thread update path outside GameScene::tick(), so any command issued
+// here goes through the normal doCommand -> network queue path exactly like
+// a UI-issued command (GameCommands::isInTickExecution() is false); nothing
+// here ever mutates GameState directly.
+void NetworkClient::updateTestRenameHook()
+{
+    if (_testRenameState == TestRenameState::none || _testRenameState == TestRenameState::done)
+    {
+        return;
+    }
+
+    if (_testRenameState == TestRenameState::assignedWaitingConnected)
+    {
+        // Wait for the full state transfer to complete and Network::isConnected()
+        // to go true (see receiveCompanyAssignmentPacket) before starting the
+        // 2s countdown, so the rename actually queues to the server instead
+        // of taking doCommand's local-apply fallback.
+        if (_status != NetworkClientStatus::connected)
+        {
+            return;
+        }
+        _testRenameState = TestRenameState::pendingIssue;
+        _testRenameDeadline = Platform::getTime() + 2000;
+        return;
+    }
+
+    if (Platform::getTime() < _testRenameDeadline)
+    {
+        return;
+    }
+
+    if (_testRenameState == TestRenameState::pendingIssue)
+    {
+        issueTestRenameCommand();
+        _testRenameState = TestRenameState::pendingVerify;
+        _testRenameDeadline = Platform::getTime() + 8000;
+    }
+    else if (_testRenameState == TestRenameState::pendingVerify)
+    {
+        verifyTestRenameCommand();
+        _testRenameState = TestRenameState::done;
+    }
+}
+
+// Issues a company rename exactly the way the UI does it (see
+// Ui::Windows::CompanyWindow::renameCompany / CompanyManager's preferred-name
+// setter): the 36-char name buffer is split into 3 chunks of 12 chars, sent
+// with bufferIndex 1, then 2, then 0 in that order -- NOT 0, 1, 2. The
+// server-side command (GameCommands::changeCompanyName) uses a transform
+// table keyed by bufferIndex to place each chunk at the right offset in its
+// own reassembly buffer, and only commits (and returns) once bufferIndex 0
+// arrives, so the order is load-bearing, not cosmetic.
+void NetworkClient::issueTestRenameCommand()
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testRename.has_value())
+    {
+        return;
+    }
+
+    auto company = CompanyManager::getControllingId();
+
+    // queueGameCommand (via GameCommands::doCommand) attributes the queued
+    // command to _updatingCompanyId, not to any ambient "current company" --
+    // it must be set explicitly before issuing, exactly like the UI does
+    // implicitly via the window's company number.
+    GameCommands::setUpdatingCompanyId(company);
+
+    char nameBuffer[36]{};
+    std::strncpy(nameBuffer, options.testRename->c_str(), sizeof(nameBuffer) - 1);
+
+    GameCommands::ChangeCompanyNameArgs args{};
+    args.companyId = company;
+    std::memcpy(args.buffer, nameBuffer, sizeof(nameBuffer));
+
+    args.bufferIndex = 1;
+    GameCommands::doCommand(args, GameCommands::Flags::apply);
+
+    args.bufferIndex = 2;
+    GameCommands::doCommand(args, GameCommands::Flags::apply);
+
+    args.bufferIndex = 0;
+    GameCommands::doCommand(args, GameCommands::Flags::apply);
+
+    Logging::info("[TEST] rename command issued");
+}
+
+// Verifies the rename actually landed by reading the company's real, current
+// name back out of GameState (same formatting call other code uses, e.g. the
+// rename command itself when checking for a name clash). Since a client
+// never applies its own queued commands locally (GameCommands::doCommand
+// only queues to the server when networked and returns without applying),
+// the name can only have changed here via the full round trip: this client's
+// queued command -> server orders + broadcasts -> both peers apply at the
+// same tick.
+void NetworkClient::verifyTestRenameCommand()
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testRename.has_value())
+    {
+        return;
+    }
+
+    auto company = CompanyManager::getControllingId();
+    auto* companyObj = CompanyManager::get(company);
+
+    char actualName[256] = "";
+    if (companyObj != nullptr)
+    {
+        StringManager::formatString(actualName, companyObj->name);
+    }
+
+    if (options.testRename.value() == actualName)
+    {
+        Logging::info("[TEST] rename verified: '{}'", actualName);
+    }
+    else
+    {
+        Logging::info("[TEST] rename FAILED: expected '{}' got '{}'", *options.testRename, actualName);
+    }
 }
 
 void NetworkClient::connect(std::string_view host, port_t port)
@@ -74,6 +200,7 @@ void NetworkClient::onClose()
 void NetworkClient::onUpdate()
 {
     processReceivedPackets();
+    updateTestRenameHook();
     if (_status == NetworkClientStatus::connecting)
     {
         if (Platform::getTime() >= _timeout)
@@ -316,6 +443,19 @@ void NetworkClient::receiveCompanyAssignmentPacket(const CompanyAssignmentPacket
     CompanyManager::setSecondaryPlayerId(CompanyId::null);
     Logging::info("Assigned company {}", static_cast<uint32_t>(packet.company));
     Gfx::invalidateScreen();
+
+    // Arm the headless client round-trip test hook (--test_rename), if set.
+    // Only arms once, on the first real company assignment. The 2s countdown
+    // to issuing does not start yet -- CompanyAssignmentPacket can (and in
+    // practice does) arrive before the state-transfer chunks finish and
+    // _status flips to `connected`; issuing while not yet connected would
+    // make GameCommands::doCommand fall through to its local-apply path
+    // instead of queuing to the server, defeating the round trip. See
+    // updateTestRenameHook().
+    if (_testRenameState == TestRenameState::none && getCommandLineOptions().testRename.has_value())
+    {
+        _testRenameState = TestRenameState::assignedWaitingConnected;
+    }
 }
 
 void NetworkClient::receivePingPacket(const PingPacket& packet)

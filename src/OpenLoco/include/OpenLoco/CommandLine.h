@@ -45,6 +45,12 @@ namespace OpenLoco
         std::optional<uint32_t> seed{};
         bool headless{};
         JoinPolicy joinPolicy = JoinPolicy::ownCompany;
+        // Hidden headless test hook (deliberately omitted from --help): when
+        // set on a joining client, drives a self-verifying client-issued
+        // game command round-trip through the lockstep pipeline once the
+        // client is assigned a real company. See NetworkClient's test-rename
+        // hook and KNOWLEDGEBASE.md § Client round-trip test hook.
+        std::optional<std::string> testRename{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);
