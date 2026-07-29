@@ -52,9 +52,14 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       Verified for `own` and `spectator` policies.
 - [ ] Wire the smoke test into a CI workflow job (fork CI; needs the stub
       install dir + competitor fixture generated in the job)
-- [ ] Fixture where the host owns a company (gensave option to create the
-      player company at generation time?) — exercises the coop join policy
-      success path and in-game command flow from a client
+- [x] Fixture where the host owns a company: gensave now creates a player
+      company when a competitor object is available, and
+      `gen_competitor_object.py` emits 8 distinct competitors (a company
+      consumes its competitor exclusively, so own-policy joins need spares).
+      All three join policies pass the scripted smoke test.
+- [ ] Client-issued in-game command round-trip test (client currently never
+      sends a game command in the smoke test; needs a headless test hook,
+      e.g. a debug flag that fires a command after assignment)
 - [x] Fixture with a minimal custom competitor `.DAT` object, unlocking the
       `createPlayerCompany` success path in the smoke test — hand-crafted
       (`scripts/gen_competitor_object.py`, regeneratable; see KNOWLEDGEBASE.md

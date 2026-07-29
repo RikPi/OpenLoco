@@ -33,10 +33,10 @@ _window"). So a zero-entry image table is legitimate and sufficient for
 all `CompanyManager::selectNewCompetitor()` needs.
 
 Regenerate with:
-    python scripts/gen_competitor_object.py [output_path]
+    python scripts/gen_competitor_object.py [output_dir] [count]
 
-Default output path assumes the standard Windows build layout:
-    build/windows/Release/data/objects/Competitor/FIXTCOMP.DAT
+Default output dir assumes the standard Windows build layout:
+    build/windows/Release/data/objects/Competitor/ (FIXTCP00.DAT ...)
 """
 import struct
 import sys
@@ -47,9 +47,11 @@ SOURCE_GAME_CUSTOM = 0  # OpenLoco::SourceGame::custom
 OBJECT_CHECKSUM_MAGIC = 0xF369A75B  # ObjectManager.cpp: objectChecksumMagic
 LANG_ENGLISH_UK = 0  # Localisation::LocoLanguageId::english_uk
 
-OBJECT_NAME = b"FIXTCOMP"  # 8 bytes, on-disk ObjectHeader.name (not the filename)
-FIRST_NAME = "Fixture"
-LAST_NAME = "Competitor"
+# A company consumes its competitor object exclusively
+# (CompanyManager::selectNewCompetitor skips competitors already in use), so
+# multiplayer tests need one object per company that can exist: the host's,
+# each joining player's, and any AI companies. Default output is a small set.
+DEFAULT_COUNT = 8
 
 # CompetitorObject fields (see CompetitorObject.h); intelligence/aggressiveness/
 # competitiveness must each be in [1, 9] per CompetitorObject::validate().
@@ -82,7 +84,7 @@ def build_string_table_entry(lang: int, text: str) -> bytes:
     return bytes([lang]) + text.encode("ascii") + b"\x00"
 
 
-def build_object_data() -> bytes:
+def build_object_data(first_name: str, last_name: str) -> bytes:
     # CompetitorObject fixed struct, 0x38 bytes. firstName/lastName/images are
     # overwritten unconditionally by CompetitorObject::load(), so their
     # on-disk values are irrelevant -- zero them.
@@ -102,9 +104,9 @@ def build_object_data() -> bytes:
     assert len(struct_bytes) == 0x38, len(struct_bytes)
 
     string_table = (
-        build_string_table_entry(LANG_ENGLISH_UK, FIRST_NAME)
+        build_string_table_entry(LANG_ENGLISH_UK, first_name)
         + b"\xff"
-        + build_string_table_entry(LANG_ENGLISH_UK, LAST_NAME)
+        + build_string_table_entry(LANG_ENGLISH_UK, last_name)
         + b"\xff"
     )
 
@@ -114,23 +116,23 @@ def build_object_data() -> bytes:
     return struct_bytes + string_table + image_table
 
 
-def build_dat_file() -> bytes:
-    data = build_object_data()
+def build_dat_file(object_name: bytes, first_name: str, last_name: str) -> bytes:
+    data = build_object_data(first_name, last_name)
 
     flags = (OBJECT_TYPE_COMPETITOR & 0x3F) | (SOURCE_GAME_CUSTOM << 6)
-    assert len(OBJECT_NAME) == 8
+    assert len(object_name) == 8
 
     checksum = compute_checksum(bytes([flags & 0xFF]), OBJECT_CHECKSUM_MAGIC)
-    checksum = compute_checksum(OBJECT_NAME, checksum)
+    checksum = compute_checksum(object_name, checksum)
     checksum = compute_checksum(data, checksum)
 
-    header = struct.pack("<I8sI", flags, OBJECT_NAME, checksum)
+    header = struct.pack("<I8sI", flags, object_name, checksum)
     chunk = struct.pack("<BI", 0, len(data)) + data  # encoding=uncompressed
     return header + chunk
 
 
 def main() -> None:
-    default_out = (
+    default_dir = (
         Path(__file__).resolve().parent.parent
         / "build"
         / "windows"
@@ -138,12 +140,21 @@ def main() -> None:
         / "data"
         / "objects"
         / "Competitor"
-        / "FIXTCOMP.DAT"
     )
-    out_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_out
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(build_dat_file())
-    print(f"Wrote {out_path} ({out_path.stat().st_size} bytes)")
+    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else default_dir
+    count = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_COUNT
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove the old single-object layout so the index doesn't hold both
+    legacy = out_dir / "FIXTCOMP.DAT"
+    if legacy.exists():
+        legacy.unlink()
+
+    for i in range(count):
+        name8 = f"FIXTCP{i:02d}".encode("ascii")
+        out_path = out_dir / f"FIXTCP{i:02d}.DAT"
+        out_path.write_bytes(build_dat_file(name8, "Fixture", f"Competitor {i}"))
+        print(f"Wrote {out_path} ({out_path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

@@ -531,6 +531,19 @@ namespace OpenLoco
 
         Scenario::generateLandscape();
 
+        // Give the state a player company when a competitor object is
+        // available (e.g. the fixture object from
+        // scripts/gen_competitor_object.py). A host loading this save then
+        // owns a company, which the coop join policy and client-issued game
+        // commands both need. Deterministic: competitor/colour selection
+        // draws from the seeded rng above.
+        CompanyManager::reset();
+        CompanyManager::createPlayerCompany();
+        if (CompanyManager::getPlayerCompany() == nullptr)
+        {
+            Diagnostics::Logging::info("No competitor object available; generated save has no player company");
+        }
+
         if (!S5::exportGameStateToFile(path, S5::SaveFlags::none))
         {
             throw std::runtime_error("Unable to export generated save game");

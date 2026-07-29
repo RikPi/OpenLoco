@@ -210,6 +210,15 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   fixes this (see § Competitor object fixture) — joins are assigned a real
   company. Towns/industries are still absent (separate object types, not
   addressed by this fixture), so AI-active sync still can't be exercised.
+- A company permanently consumes its competitor object
+  (`selectNewCompetitor` skips in-use competitors) — fixtures need one
+  competitor object per company that will ever exist; the generator emits 8
+  (`FIXTCP00..07`). Delete `%APPDATA%\OpenLoco\plugin.dat` (the object
+  index cache) after changing the object set or the new objects are not
+  seen.
+- gensave creates a player company when a competitor object is available
+  (host then owns a company: coop policy + client command tests work);
+  logs and continues without one.
 - Join policy (Phase C): host-side `--join_policy <own|coop|spectator>`
   (CommandLine `JoinPolicy`, applied in
   `NetworkServer::onReceiveStateRequestPacket`). `coop` reuses the host's
