@@ -8,7 +8,9 @@
 #include "GameStateFlags.h"
 #include "Input.h"
 #include "Localisation/StringIds.h"
+#include "Logging.h"
 #include "MultiPlayer.h"
+#include "Network/Network.h"
 #include "Objects/ObjectIndex.h"
 #include "OpenLoco.h"
 #include "S5/S5.h"
@@ -140,12 +142,11 @@ namespace OpenLoco::Game
         }
         else if (SceneManager::isNetworked())
         {
-            // 0x0043C0DB
-            if (CompanyManager::getControllingId() == GameCommands::getUpdatingCompanyId())
-            {
-                MultiPlayer::setFlag(MultiPlayer::flags::flag_4);
-                MultiPlayer::setFlag(MultiPlayer::flags::flag_3);
-            }
+            // Loading a different save mid-session would need a coordinated
+            // host-driven state redistribution; not supported yet. (Vanilla
+            // set two-player handshake flags here that resolved to
+            // unimplemented commands.)
+            Diagnostics::Logging::warn("Loading a game is not available while in a network session");
         }
 
         // 0x0043C0D1
@@ -156,6 +157,14 @@ namespace OpenLoco::Game
     void quitGame()
     {
         GameCommands::resetCommandNestLevel();
+
+        // Leave the network session first: closes the socket and clears the
+        // networked scene flags (clients of a quitting host will time out
+        // until graceful shutdown notification exists)
+        if (SceneManager::isNetworked())
+        {
+            Network::close();
+        }
 
         // Path for networked games; untested.
         if (SceneManager::isNetworked())
@@ -212,6 +221,7 @@ namespace OpenLoco::Game
     {
         if (SceneManager::isNetworked())
         {
+            Network::close();
             Ui::WindowManager::closeAllFloatingWindows();
         }
 
@@ -233,7 +243,7 @@ namespace OpenLoco::Game
     }
 
     // 0x0043C427
-    void confirmSaveGame(LoadOrQuitMode promptSaveType)
+    void confirmSaveGame([[maybe_unused]] LoadOrQuitMode promptSaveType)
     {
         ToolManager::toolCancel();
 
@@ -251,8 +261,13 @@ namespace OpenLoco::Game
                 }
             }
         }
-        else if (!SceneManager::isNetworked())
+        else
         {
+            // In network games the state is identical on every peer, so
+            // saving is an ordinary machine-local export - same flow as
+            // single player. (Vanilla's two-player save handshake used to
+            // live here; it was dead plumbing wired to unimplemented
+            // commands.)
             if (auto res = Game::saveSaveGameOpen())
             {
                 // 0x0043C446
@@ -276,25 +291,6 @@ namespace OpenLoco::Game
                     args.saveMode = GameCommands::LoadSaveQuitGameArgs::SaveMode::dontSave;
                     GameCommands::doCommand(args, GameCommands::Flags::apply);
                 }
-            }
-        }
-        else
-        {
-            // 0x0043C511
-            GameCommands::do_72();
-            MultiPlayer::setFlag(MultiPlayer::flags::flag_2);
-
-            switch (promptSaveType)
-            {
-                case LoadOrQuitMode::loadGamePrompt:
-                    MultiPlayer::setFlag(MultiPlayer::flags::flag_13); // intend to load?
-                    break;
-                case LoadOrQuitMode::returnToTitlePrompt:
-                    MultiPlayer::setFlag(MultiPlayer::flags::flag_14); // intend to return to title?
-                    break;
-                case LoadOrQuitMode::quitGamePrompt:
-                    MultiPlayer::setFlag(MultiPlayer::flags::flag_15); // intend to quit game?
-                    break;
             }
         }
 

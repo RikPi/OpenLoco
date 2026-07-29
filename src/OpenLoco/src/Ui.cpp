@@ -919,27 +919,11 @@ namespace OpenLoco::Ui
             GameCommands::doCommand(args, GameCommands::Flags::apply);
         }
 
-        if (!MultiPlayer::hasFlag(MultiPlayer::flags::flag_0) && !MultiPlayer::hasFlag(MultiPlayer::flags::flag_4))
-        {
-            if (MultiPlayer::resetFlag(MultiPlayer::flags::flag_2))
-            {
-                WindowManager::closeConstructionWindows();
-                WindowManager::closeAllFloatingWindows();
-                GameCommands::do_69();
-            }
-
-            if (MultiPlayer::resetFlag(MultiPlayer::flags::flag_3))
-            {
-                WindowManager::closeConstructionWindows();
-                WindowManager::closeAllFloatingWindows();
-                GameCommands::do_70();
-            }
-        }
-
-        if (MultiPlayer::resetFlag(MultiPlayer::flags::flag_4))
-        {
-            GameCommands::do_72();
-        }
+        // Vanilla's two-player save/load handshake used to consume
+        // MultiPlayer flags 2/3/4 here, firing game commands 69/70/72.
+        // Nothing sets those flags anymore: networked save/load/quit is
+        // machine-local (see Game.cpp), and command 69 has been repurposed
+        // as createPlayerCompany.
 
         if (MultiPlayer::resetFlag(MultiPlayer::flags::flag_0))
         {

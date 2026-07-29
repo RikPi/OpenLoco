@@ -162,15 +162,8 @@ namespace OpenLoco::Ui::Windows::ToolbarTop::Game
     {
         ToolManager::toolCancel();
 
-        if (SceneManager::isNetworked())
-        {
-            if (GameCommands::getUpdatingCompanyId() == CompanyManager::getControllingId())
-            {
-                GameCommands::do_72();
-                MultiPlayer::setFlag(MultiPlayer::flags::flag_2);
-            }
-            return;
-        }
+        // Network games save exactly like single player: every peer holds
+        // the identical state, so this is an ordinary machine-local export
 
         auto res = OpenLoco::Game::saveSaveGameOpen();
         if (!res)

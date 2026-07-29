@@ -44,6 +44,30 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
         spectator", no desync). coop success path needs a fixture where
         the host owns a company (see backlog).
 
+## Milestone 2: playable multiplayer
+
+- [x] Networked save/load/quit made machine-local: `loadSaveQuitGame` no
+      longer replicates (prompt only opens on the initiating machine),
+      networked Save is an ordinary local S5 export, networked Load logs
+      "not available", quit/return-to-title call `Network::close()`.
+      Removed vanilla's dead two-player save handshake (MultiPlayer flags
+      2/3/4 consumers, `do_69`/`do_70`/`do_72` helpers) — this also fixes
+      the serious bug where networked Save spuriously broadcast a
+      `createPlayerCompany` (repurposed vanilla id 69) to the session.
+- [x] TitleMenu crash hazard: networked draw dereferenced raw vanilla
+      address 0xF254D0 for the player name — now shows the configured
+      local name. Multiplayer toggle while connected now disconnects
+      instead of re-entering joinServer (assert/UB).
+- [ ] Host-driven mid-session Load (redistribute snapshot to clients)
+- [ ] Player roster window (client names + companies + spectators; needs a
+      roster broadcast packet)
+- [ ] Join dialog: optional port (currently kDefaultPort only); UI-initiated
+      hosting can't choose bind/port (openServer reads CLI options)
+- [ ] Graceful disconnect notification (clients of a quitting host
+      currently time out)
+- [ ] Options UI checkbox for `network.enabled` (currently config-file-only,
+      default false — all multiplayer UI hidden on fresh installs)
+
 ## Backlog
 
 - [x] Scripted smoke test: `scripts/run_sync_smoke_test.ps1` (gensave →

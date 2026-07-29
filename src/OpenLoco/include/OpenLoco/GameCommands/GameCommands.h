@@ -231,23 +231,6 @@ namespace OpenLoco::GameCommands
         doCommand(GameCommand::loadMultiplayerMap, regs);
     }
 
-    // Multiplayer-related (vanilla two-player leftover call site; now maps to
-    // createPlayerCompany)
-    inline void do_69()
-    {
-        registers regs;
-        regs.bl = Flags::apply;
-        doCommand(GameCommand::createPlayerCompany, regs);
-    }
-
-    // Multiplayer-related
-    inline void do_70()
-    {
-        registers regs;
-        regs.bl = Flags::apply;
-        doCommand(GameCommand::gc_unk_70, regs);
-    }
-
     // Send chat message
     inline void do_71(int32_t ax, const char* string)
     {
@@ -259,14 +242,6 @@ namespace OpenLoco::GameCommands
         memcpy(&regs.ebp, &string[8], 4);
         memcpy(&regs.edi, &string[12], 4);
         doCommand(GameCommand::sendChatMessage, regs);
-    }
-
-    // Multiplayer save
-    inline void do_72()
-    {
-        registers regs;
-        regs.bl = Flags::apply;
-        doCommand(GameCommand::multiplayerSave, regs);
     }
 
     const World::Pos3& getPosition();

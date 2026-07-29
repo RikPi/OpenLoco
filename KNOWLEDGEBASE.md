@@ -219,6 +219,13 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
 - gensave creates a player company when a competitor object is available
   (host then owns a company: coop policy + client command tests work);
   logs and continues without one.
+- `loadSaveQuitGame` (21) is deliberately LOCAL-ONLY when networked (see
+  the `isLocalOnly` carve-out in `doCommand`): saving exports the identical
+  local state, loading/quitting means leaving the session. Vanilla instead
+  replicated the prompt to every peer and resolved Save through a dead
+  two-player handshake (MultiPlayer flags 2/3/4 → commands 69/70/72) —
+  removed; beware resurrecting any `do_69`-style helper, id 69 is
+  createPlayerCompany now.
 - Join policy (Phase C): host-side `--join_policy <own|coop|spectator>`
   (CommandLine `JoinPolicy`, applied in
   `NetworkServer::onReceiveStateRequestPacket`). `coop` reuses the host's

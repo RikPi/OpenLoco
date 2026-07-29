@@ -285,9 +285,10 @@ namespace OpenLoco::Ui::Windows::TitleMenu
                 // char[512+1]
                 auto buffer = StringManager::getString(StringIds::buffer_2039);
 
-                // TODO: ?? replace this
-                char* playerName = (char*)0xF254D0;
-                strcpy((char*)buffer, playerName);
+                // Show the local player's configured name (vanilla read a
+                // remote player name from a raw legacy address here)
+                const auto& playerName = Config::get().preferredOwnerName;
+                std::snprintf((char*)buffer, 512, "%s", playerName.empty() ? "Player" : playerName.c_str());
 
                 args.push(StringIds::buffer_2039);
                 string = StringIds::two_player_mode_connected;
@@ -321,7 +322,17 @@ namespace OpenLoco::Ui::Windows::TitleMenu
                 beginSendChatMessage(window);
                 break;
             case Widx::kMultiplayerToggleBtn:
-                showMultiplayer(&window);
+                if (SceneManager::isNetworked())
+                {
+                    // Already connected: joining again would clobber the
+                    // active connection. Disconnect instead.
+                    Network::close();
+                    Gfx::invalidateScreen();
+                }
+                else
+                {
+                    showMultiplayer(&window);
+                }
                 break;
         }
     }

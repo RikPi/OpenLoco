@@ -283,7 +283,14 @@ namespace OpenLoco::GameCommands
         }
 
         auto isGhost = (flags & Flags::ghost) != 0;
-        if (!isGhost && !_inTickExecution && Network::isConnected())
+
+        // Load/save/quit is a machine-local concern in network games: saving
+        // exports the (identical) local state, and loading/quitting means
+        // leaving the session - none of it may run on other peers. Keep it
+        // out of the replicated command stream.
+        auto isLocalOnly = command == GameCommand::loadSaveQuitGame;
+
+        if (!isGhost && !isLocalOnly && !_inTickExecution && Network::isConnected())
         {
             // For network games, we need to delay the command apply processing
             // Just return the result without applying for now
