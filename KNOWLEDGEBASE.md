@@ -24,19 +24,73 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   - `%APPDATA%\OpenLoco\openloco.yml` needs `allow_multiple_instances: true`
     (global named mutex otherwise blocks host+client on one machine).
   - `gensave <out.sv5> [--seed N]` generates a byte-deterministic fixture
-    (same seed ⇒ identical file). Current fixture has 0 towns/industries/
-    competitors because OpenGraphics lacks those object types.
+    (same seed ⇒ identical file). Current fixture has 0 towns/industries
+    because OpenGraphics lacks those object types; competitors are now
+    covered by a hand-crafted fixture object (see § Competitor object
+    fixture) placed in `data/objects/Competitor/`.
   - `--headless` skips window/cursor/audio and runs the plain update loop;
     `host`/`join` work under it.
 - Proven smoke test: `gensave` → start host (`--headless host fixture.sv5`)
   → start client (`--headless join 127.0.0.1`) → wait → check
   `%APPDATA%\OpenLoco\logs\openloco_*.log`. Success = exactly one
   `Accepted new client`, client `Scene transition: boot -> gameplay`, zero
-  `[ERR]`/desync lines.
+  `[ERR]`/desync lines. With the competitor fixture installed (see below),
+  also expect host `Assigned company N to client '...'` and client
+  `Assigned company N` — the join-time `createPlayerCompany` success path.
 - stdout is fully buffered and LOST when the process is killed — use the
   file logs (they flush per line), or stderr.
 - `simulate <save> N [-o out]` + `compare` = single-process determinism
   harness (upstream CI uses this with private assets).
+- git-bash (this environment's Bash tool) strips unquoted backslashes from
+  arguments (`C:\foo\bar` → `C:foobar`), silently breaking
+  `--locomotion_path`/similar Windows-path CLI args — use forward slashes
+  (`C:/foo/bar`) or quote the backslashed form.
+
+## Competitor object fixture
+
+- OpenGraphics' release zip (fetched by `FetchContent_Declare(openloco_objects
+  ...)` in `CMakeLists.txt`) ships a Competitor/ folder with zero files —
+  verified by inspecting the fetched source at
+  `build\windows\_deps\openloco_objects-src\Competitor` (empty) — so there is
+  no upstream object to copy or rebuild; it had to be hand-crafted.
+- `scripts/gen_competitor_object.py` writes a minimal valid Competitor `.DAT`
+  to `data\objects\Competitor\FIXTCOMP.DAT` (regenerate with
+  `python scripts/gen_competitor_object.py [out_path]`; default path assumes
+  the standard `build\windows\Release` layout). No CMake/build wiring — it's
+  a standalone generator, run once, output committed like any other data
+  file would be (not committed by this change per task constraints).
+- On-disk format (reverse-engineered and checksum-verified byte-for-byte
+  against a real shipped object, `OG_COAL.dat`, before trusting it):
+  `ObjectHeader` (0x10 bytes: `flags` u32 [byte 0 = type|sourceGame<<6],
+  `name[8]`, `checksum` u32) + one `SawyerStreamWriter` chunk (`encoding` u8,
+  `length` u32, payload) holding the `CompetitorObject` struct (0x38 bytes,
+  `CompetitorObject.h`) + two string-table entries (`ObjectStringTable.cpp`:
+  repeated `[lang u8][cstring\0]`, terminated by `0xFF`) + an image table
+  (`ObjectImageTable.cpp`: `G1Header{numEntries,totalSize}` + elements +
+  pixel data). `checksum` = rotl-based `computeObjectChecksum`
+  (`ObjectManager.cpp`) over (header flags byte 0, header name, decoded
+  chunk payload) — no full-file trailing checksum is used for `.DAT` objects
+  (that's a separate S5-save-only mechanism).
+- Minimality found by reading `CompetitorObject::load`/`::validate`: only
+  `emotions` bit 0 needs to be set (validate requirement); `intelligence`/
+  `aggressiveness`/`competitiveness` must be in [1,9]; `firstName`/
+  `lastName`/`images[9]` in the file are irrelevant (unconditionally
+  overwritten by `load()` from the string/image tables). An **empty** image
+  table (`G1Header{numEntries=0, totalSize=0}`) parses successfully and is
+  never dereferenced unless the object is actually drawn, which never
+  happens headless (`Ui::render`/`Gfx::renderAndUpdate` null-check `_window`
+  first) — so no real sprite data was needed, contrary to the initial
+  worry. `availableNamePrefixes`/`availablePlayStyles` are unused on the
+  join path (`createCompany(..., isPlayer=true)` skips that branch) but were
+  given bit 0 anyway as a defensive guard against an empty-vector index if
+  the same object is ever picked for an AI company.
+- No loader code changes were needed — the existing null-guards and
+  zero-entry-table handling were already sufficient.
+- The object index (`%APPDATA%\OpenLoco\plugin.dat`) auto-rebuilds when
+  `ObjectFolderState` (file count/total size/date hash) changes, so dropping
+  a new `.DAT` into `data\objects\Competitor\` is picked up on next launch
+  without manually deleting the cache (deleting it is harmless and was done
+  once here for a clean-slate check).
 
 ## Lockstep architecture facts
 
@@ -147,12 +201,13 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   state chunk; `runGameCommands()` reads `LegacyReturnState::lastCreatedCompanyId`
   after `doCommandForReal` to resolve the assignment and send
   `CompanyAssignmentPacket` (new, targeted, not broadcast).
-- Headless fixture caveat (still true after Phase B): OpenGraphics has zero
-  competitor objects, so `createPlayerCompany` always fails there
-  (`selectNewCompetitor()` returns `kNullObjectId`) — a joining client stays
-  spectator by design in this environment. That is the expected/passing
-  smoke-test outcome, not a bug; a richer fixture (backlog item) is needed
-  to exercise the success path.
+- Headless fixture caveat, resolved for the competitor case: OpenGraphics
+  ships zero competitor objects, so `createPlayerCompany` used to always
+  fail (`selectNewCompetitor()` returning `kNullObjectId`), leaving a
+  joining client a spectator by design. A hand-crafted fixture object now
+  fixes this (see § Competitor object fixture) — joins are assigned a real
+  company. Towns/industries are still absent (separate object types, not
+  addressed by this fixture), so AI-active sync still can't be exercised.
 - Chat is packet-level (`sendChatMessage` relay), never a game command;
   UI in `Ui/Windows/Chat.cpp` (WindowType::chat = 38).
 - Windows are declared via facades in `Ui/WindowManager.h`, registered in

@@ -42,10 +42,17 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 
 - [ ] CI job: gensave → headless host+join → assert no desync (script the
       proven smoke test)
-- [ ] Fixture with towns/industries/competitors to exercise AI-active sync
-      (currently OpenGraphics lacks those object types in our index).
-      Likely path: author a minimal custom competitor `.DAT` object (also
-      unlocks the createPlayerCompany success path in the smoke test)
+- [x] Fixture with a minimal custom competitor `.DAT` object, unlocking the
+      `createPlayerCompany` success path in the smoke test — hand-crafted
+      (`scripts/gen_competitor_object.py`, regeneratable; see KNOWLEDGEBASE.md
+      § Competitor object fixture) since the OpenGraphics release zip ships
+      zero Competitor objects. Verified: `gensave`/`simulate` still work,
+      headless host+join now logs `Assigned company 0 to client '...'` /
+      client `Assigned company 0` (instead of spectator fallback), zero
+      `[ERR]`/desync lines over the run, ctest 144/144. Towns/industries
+      still absent (unaffected — separate object types), so this only
+      exercises the join-time company-assignment path, not full AI-active
+      sync.
 - [ ] Trim/derive client display name (empty `preferredOwnerName` logs as
       blank padding in "Accepted new client"/assignment messages)
 - [ ] Typed serialization for the 3 complex-type commands
