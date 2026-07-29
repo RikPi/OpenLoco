@@ -102,7 +102,7 @@ namespace OpenLoco::Config
         if (networkNode && networkNode.IsMap())
         {
             auto& networkConfig = _config.network;
-            networkConfig.enabled = networkNode["enabled"].as<bool>(false);
+            networkConfig.enabled = networkNode["enabled"].as<bool>(true);
         }
 
         // General

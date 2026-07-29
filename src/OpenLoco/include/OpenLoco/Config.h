@@ -137,7 +137,9 @@ namespace OpenLoco::Config
 
     struct Network
     {
-        bool enabled{};
+        // Multiplayer UI is enabled by default on this branch (upstream
+        // defaults to hidden while multiplayer is a work in progress)
+        bool enabled{ true };
     };
 
     constexpr auto kMessageCriticalityCount = 6;

@@ -387,9 +387,55 @@ namespace OpenLoco::Ui::Windows::TitleMenu
         TextInput::openTextInput(window, StringIds::enter_host_address, StringIds::enter_host_address_description, StringIds::buffer_2039, widx::multiplayer_toggle_btn, {});
     }
 
-    static void multiplayerConnect(std::string_view host)
+    static void multiplayerConnect(std::string_view input)
     {
-        Network::joinServer(host);
+        // Accept "host", "host:port" and "[ipv6]:port"
+        auto host = input;
+        auto port = Network::kDefaultPort;
+
+        auto parsePort = [&](std::string_view text) {
+            uint32_t value = 0;
+            for (auto c : text)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (text.empty() || value == 0 || value > 0xFFFFU)
+            {
+                return false;
+            }
+            port = static_cast<Network::port_t>(value);
+            return true;
+        };
+
+        if (!input.empty() && input.front() == '[')
+        {
+            // [ipv6]:port
+            auto closing = input.find(']');
+            if (closing != std::string_view::npos)
+            {
+                host = input.substr(1, closing - 1);
+                auto rest = input.substr(closing + 1);
+                if (rest.size() >= 2 && rest.front() == ':')
+                {
+                    parsePort(rest.substr(1));
+                }
+            }
+        }
+        else if (auto colon = input.find(':'); colon != std::string_view::npos && input.find(':', colon + 1) == std::string_view::npos)
+        {
+            // Exactly one colon: host:port. (Bare IPv6 addresses contain
+            // several colons and are passed through unchanged.)
+            if (parsePort(input.substr(colon + 1)))
+            {
+                host = input.substr(0, colon);
+            }
+        }
+
+        Network::joinServer(host, port);
     }
 
     static void sub_43910A()

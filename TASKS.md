@@ -59,14 +59,61 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       local name. Multiplayer toggle while connected now disconnects
       instead of re-entering joinServer (assert/UB).
 - [ ] Host-driven mid-session Load (redistribute snapshot to clients)
-- [ ] Player roster window (client names + companies + spectators; needs a
-      roster broadcast packet)
-- [ ] Join dialog: optional port (currently kDefaultPort only); UI-initiated
-      hosting can't choose bind/port (openServer reads CLI options)
-- [ ] Graceful disconnect notification (clients of a quitting host
-      currently time out)
-- [ ] Options UI checkbox for `network.enabled` (currently config-file-only,
-      default false — all multiplayer UI hidden on fresh installs)
+- [x] Player roster window (client names + companies + spectators; roster
+      broadcast packet). Network version bumped to 4. New `rosterUpdate`
+      packet (`RosterUpdatePacket`/`RosterEntry` in `Packet.h`, variable-
+      length like `SendChatMessage` - only `count` entries go on the wire),
+      broadcast by the server whenever the roster changes (client accepted,
+      timed out, company assigned/coop/spectator resolved). Server builds
+      the roster from its live client list plus a synthetic host entry
+      (`client_id_t 0`, same id already used for host chat messages);
+      clients store the latest snapshot. Single facade call for UI code:
+      `Network::getPlayerRoster()` (server rebuilds on demand, client
+      returns its last received snapshot) — presentation data only, never
+      touches `GameState` or the game command stream. New read-only window
+      `Ui/Windows/PlayerList.cpp` (`WindowType::playerList = 62`, the first
+      free slot past `debug`), modeled on `Chat.cpp`; opened alongside Chat
+      from `TimePanel::beginSendChatMessage` (no other reachable trigger
+      added — see KNOWLEDGEBASE.md § Player roster for the rationale).
+      Display-name fix: `Network::resolveDisplayName` trims
+      whitespace/NUL padding from the connect packet's fixed-size name
+      buffer (and the host's `preferredOwnerName`) and falls back to
+      "Player #<id>" when empty, fixing the blank-padding in "Accepted new
+      client"/assignment log lines; chat now resolves the sender's display
+      name via the roster instead of always printing "Player #N". Verified
+      headless: client log shows `Roster: 2 players: 'Player #0' company 0,
+      'Player #1' spectator` immediately after joining, then `Roster: 2
+      players: 'Player #0' company 0, 'Player #1' company 1` once the
+      company assignment resolves; zero `[ERR]`/desync lines; ctest 144/144;
+      `-TestRename` smoke test still PASSes (regression).
+- [x] Join dialog accepts `host`, `host:port` and `[ipv6]:port` (parsed in
+      TitleMenu::multiplayerConnect; bare IPv6 passes through unchanged).
+      Still open: UI-initiated hosting can't choose bind/port (openServer
+      reads CLI options).
+- [x] `network.enabled` defaults to true on this branch (Config.h struct
+      default + yaml fallback) — multiplayer UI visible out of the box;
+      upstream keeps it hidden while WIP.
+- [x] Graceful disconnect notification for the clean-quit path (clients of
+      a hard-killed/crashed host still time out - see KNOWLEDGEBASE.md §
+      Graceful disconnect for that expected gap). New `serverClosing`
+      packet (no payload), sent by `NetworkServer::onClose()` to every
+      still-connected client before sockets are torn down (`sendPacket`
+      writes to the socket synchronously, so this does not depend on the
+      already-stopped receive thread). Client logs "Server is shutting
+      down", posts it to the Chat window, requests the title scene, and
+      closes its own connection. Verified by code review + build/tests
+      (144/144, `-TestRename` smoke test PASS); headless has no exposed
+      clean-quit trigger yet (separate backlog item below), so the
+      packet-send path itself could not be exercised end-to-end headless -
+      the hard-kill path (which deliberately does NOT send `serverClosing`)
+      was verified instead: client log shows `Connection with server timed
+      out` / `Disconnected from server` ~15s after `Stop-Process` on the
+      host, no crash.
+- [ ] Options UI checkbox for `network.enabled` (config-file-only today;
+      branch default is now true so this is polish, not a blocker)
+- [ ] Fix `Utility::nullTerminatedView` upstream-style: both loop branches
+      return the same full-length view (latent bug found during the roster
+      work; currently worked around by `Network::resolveDisplayName`)
 
 ## Backlog
 
@@ -118,15 +165,26 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       still absent (unaffected — separate object types), so this only
       exercises the join-time company-assignment path, not full AI-active
       sync.
-- [ ] Trim/derive client display name (empty `preferredOwnerName` logs as
-      blank padding in "Accepted new client"/assignment messages)
+- [x] Trim/derive client display name (empty `preferredOwnerName` logs as
+      blank padding in "Accepted new client"/assignment messages) — done as
+      part of the player roster work (`Network::resolveDisplayName`); see
+      Milestone 2.
 - [ ] Typed serialization for the 3 complex-type commands
       (`changeCompanyFace`, `updateOwnerStatus`, `vehicleRepaint`)
-- [ ] Player names in chat (needs client→name registry at Network layer)
+- [x] Player names in chat (needs client→name registry at Network layer) —
+      done as part of the player roster work: `Network::receiveChatMessage`
+      resolves the sender's display name via `Network::getPlayerRoster()`,
+      falling back to "Player #N" only if the roster doesn't have the
+      sender yet.
 - [ ] Reconnect / host migration
 - [ ] Lobby & server browser
 - [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
-- [ ] Graceful shutdown for `--headless` (currently killed externally)
+- [ ] Graceful shutdown for `--headless` (currently killed externally) — the
+      server-side `serverClosing` notification now exists (see Milestone 2)
+      but nothing in headless mode calls `Network::close()`/exits cleanly to
+      trigger it; this item is now specifically about adding that headless
+      trigger (e.g. a signal handler or a CLI-driven shutdown), not about
+      the notification itself.
 - [ ] Upstream grooming: split branch into reviewable PRs
 
 ## Blocked / external

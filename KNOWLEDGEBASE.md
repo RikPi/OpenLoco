@@ -306,6 +306,122 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   real company via the assignment packet — a `company` outcome, not
   `spectator`); default is now `spectator` only for `-JoinPolicy spectator`.
 
+## Player roster and graceful disconnect (network version 4)
+
+- Wire additions in `Packet.h`: `PacketKind::rosterUpdate` /
+  `RosterUpdatePacket` (`RosterEntry{ client_id_t id; CompanyId company;
+  uint8_t nameLength; char name[31] }`, `count` prefix, max 32 entries -
+  `static_assert(sizeof(RosterUpdatePacket) <= kMaxPacketDataSize)`) and
+  `PacketKind::serverClosing` / `ServerClosingPacket` (no payload).
+  `RosterUpdatePacket::size()` follows `SendChatMessage`'s pattern exactly
+  (`this->entries + count`, not `sizeof(RosterUpdatePacket)`) so only the
+  entries actually in use go on the wire, not the full reserved 32-entry
+  buffer.
+- `Network::PlayerRosterEntry` (`Network.h`) is the presentation-level type
+  (`id`, `company`, `std::string name`) UI code and `Network.cpp` work with;
+  `Network::toWirePacket`/`fromWirePacket` overloads convert to/from
+  `RosterUpdatePacket`. This is intentionally a separate type from the wire
+  `RosterEntry` - keeps roster data out of `GameState`/game commands by
+  construction (nothing here can accidentally be typed as, or fed to,
+  `GameCommands::doCommand`).
+- Single facade call for all roster reads: `Network::getPlayerRoster()`.
+  On the server it rebuilds from the live `_clients` list plus a synthetic
+  host entry every call (`NetworkServer::buildRoster()`, cheap, no caching
+  needed); on a client it returns the last `RosterUpdatePacket` received
+  (`NetworkClient::getRoster()`). `client_id_t 0` is reserved for the host
+  in both the roster and chat (matches the pre-existing convention in
+  `NetworkServer::sendChatMessage`, which already used sender id `0` for
+  host-originated chat).
+- `NetworkServer::broadcastRosterUpdate()` is called from every place the
+  roster can change: `createNewClient` (client accepted), coop/spectator
+  assignment in `onReceiveStateRequestPacket`, the `createPlayerCompany`
+  join-flow resolution in `runGameCommands` (both the success and
+  spectator-fallback branches), and `removedTimedOutClients` (only if a
+  client was actually removed).
+- Display-name rule (`Network::resolveDisplayName`, `Network.h`/`.cpp`):
+  strip everything from the first NUL onward, then `Utility::trim` the
+  rest; falls back to `"Player #<id>"` if that's empty. This replaced a
+  latent bug in `Utility::nullTerminatedView` (`String.hpp`) - it returns
+  `std::string_view(src, N)` on **both** branches of its loop (the
+  early-return-on-NUL branch was dead code), so a short name in a `char[32]`
+  buffer always carried the trailing NUL padding into the resulting
+  `std::string`, which is what actually produced the "blank padding" in
+  logs (embedded NULs mid-string, not just trailing whitespace). Left
+  `nullTerminatedView` itself unchanged (out of scope; used elsewhere) and
+  just stopped using it for names. Applied at the one place a raw name
+  enters the system (`NetworkServer::createNewClient`, from `ConnectPacket`)
+  and for the host's own `Config::get().preferredOwnerName` in
+  `buildRoster()` - every other log/roster/chat site downstream already
+  gets the resolved name.
+- Chat sender names: `Network::receiveChatMessage` now looks the sender's
+  `client_id_t` up in `Network::getPlayerRoster()` (falls back to the old
+  `"Player #N"` only if not found, e.g. the very first message before any
+  `RosterUpdatePacket` has arrived) and passes the resolved name to
+  `Ui::Windows::Chat::addMessage`, whose signature changed from
+  `(uint32_t clientId, ...)` to `(std::string_view senderName, ...)` -
+  name resolution now happens once, at the network layer, not duplicated
+  in the window.
+- `Ui/Windows/PlayerList.cpp`: read-only window, modeled closely on
+  `Chat.cpp` (same facade/registration/CMakeLists pattern). `draw()` calls
+  `Network::getPlayerRoster()` directly every frame it's visible (cheap,
+  see above) and renders `"name - company N"` / `"name - spectator"` per
+  entry - no scrolling/sorting, intentionally minimal. New `WindowType`
+  slot: `playerList = 62`, the first value past `debug = 61` (the
+  highest-numbered existing entry; slots `5` and `8` are also unused gaps
+  earlier in the enum but 62 avoids any doubt about whether a low gap has
+  latent vanilla meaning).
+- No dedicated UI trigger exists for the player list yet (would need a new
+  caption/menu string, i.e. asset changes, to do "properly"). Cheapest
+  reachable trigger per the task: `Ui::Windows::PlayerList::open()` is
+  called right alongside `Chat::open()` in
+  `TimePanel::beginSendChatMessage` - opening chat also opens the roster.
+  Slightly redundant UX (every chat-open pops both windows) but needs zero
+  new localised strings; `PlayerList`'s own caption uses `StringIds::empty`
+  like `NetworkStatus.cpp` does. A dedicated "show players" dropdown entry
+  or a button on the Chat window are both better long-term options, noted
+  as a follow-up rather than done here.
+- `NetworkServer::onClose()` sends `ServerClosingPacket` to all clients via
+  `sendPacketToAll` before `NetworkBase::close()` clears `_sockets`.
+  `NetworkConnection::sendPacket` writes to the UDP socket synchronously
+  (`_socket->sendData(...)`), so this does not depend on the receive
+  thread (already joined by the time `onClose()` runs) or on any extra
+  flush - the send either succeeds as a normal best-effort UDP write or it
+  doesn't, same as every other packet.
+- `NetworkClient::receiveServerClosingPacket` logs "Server is shutting
+  down", posts the same text to the Chat window (`Ui::Windows::
+  Chat::addMessage("Server", ...)` - deliberately not `NetworkStatus`,
+  to avoid opening a fresh window with a `this`-capturing close callback
+  moments before the `NetworkClient` object is destroyed by
+  `Network::tick()`'s post-`update()` `isClosed()` check - see
+  `NetworkBase::close()`/`Network::close()`), requests the title scene
+  (`SceneManager::requestScene` just sets a deferred flag, safe to call
+  from anywhere on the main thread), then calls `close()`. Calling `close()`
+  from inside a packet handler is an already-established pattern here -
+  `processReceivedPackets()`'s loop explicitly checks `_serverConnection ==
+  nullptr` after each handler for exactly this reason (see
+  `receiveConnectionResponsePacket`'s rejection path, pre-existing).
+- Verified headless (2-player, `own` join policy): client log shows
+  `[INF] Roster: 2 players: 'Player #0' company 0, 'Player #1' spectator`
+  right after joining - the first broadcast, sent when the client is
+  accepted, before its `createPlayerCompany` command has resolved - then
+  `[INF] Roster: 2 players: 'Player #0' company 0, 'Player #1' company 1`
+  once the assignment lands (second broadcast, from `runGameCommands`),
+  immediately followed by `Scene transition: boot -> gameplay`; zero
+  `[ERR]`/desync lines. Names show as `Player #0`/`Player #1` (not garbage/blank) because
+  the headless fixture's `preferredOwnerName`/connect name are empty and
+  the fallback rule is working as designed, not because trimming failed.
+- `serverClosing` could not be exercised end-to-end headless: `--headless`
+  has no clean-quit trigger (`Network::close()` is only ever reached via UI
+  quit flows; see the now-narrowed "Graceful shutdown for `--headless`"
+  backlog item in `TASKS.md`) - verified by code review plus the fact the
+  build/tests/existing smoke test still pass. What *was* verified headless
+  is the deliberately-different hard-kill path: `Stop-Process` on the host
+  produces no `serverClosing` (expected - the process never runs its
+  destructor chain), and the client's pre-existing 15s connection-timeout
+  path still fires correctly (`Connection with server timed out` /
+  `Disconnected from server` in the client log, process stays alive
+  afterwards, no crash).
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the
