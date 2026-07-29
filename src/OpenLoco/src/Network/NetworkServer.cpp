@@ -14,6 +14,7 @@
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/Platform/Platform.h>
 #include <algorithm>
+#include <cstdlib>
 #include <random>
 #include <span>
 #include <tuple>
@@ -27,6 +28,27 @@ constexpr uint32_t kPingInterval = 30;
 // (phase 2 - design)"): ~30s, plus an immediate announce on every roster
 // change (see NetworkServer::broadcastRosterUpdate).
 constexpr uint32_t kMasterAnnounceIntervalMs = 30000;
+
+// Host migration (docs/multiplayer.md § Host migration). --test_fast_retry
+// (CommandLine.h) shortens both for test practicality only; default
+// behaviour/timing is unchanged without the flag.
+constexpr uint32_t kMigrationPlanIntervalMs = 10000;
+constexpr uint32_t kFastMigrationPlanIntervalMs = 2000;
+constexpr uint32_t kMigrationWindowMs = 60000;
+constexpr uint32_t kFastMigrationWindowMs = 20000;
+
+namespace
+{
+    uint32_t migrationPlanIntervalMs()
+    {
+        return getCommandLineOptions().testFastRetry ? kFastMigrationPlanIntervalMs : kMigrationPlanIntervalMs;
+    }
+
+    uint32_t migrationWindowMs()
+    {
+        return getCommandLineOptions().testFastRetry ? kFastMigrationWindowMs : kMigrationWindowMs;
+    }
+}
 
 namespace
 {
@@ -177,6 +199,52 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
         return;
     }
 
+    // Migration reclaim path (docs/multiplayer.md § Host migration): while
+    // this server's migration window is open (only ever true for a server
+    // created via Network::promoteToHost() - see seedMigrationReservedSeats),
+    // a migrationReclaim connect matches by trimmed name against the
+    // migration-seeded reserved seats rather than by token - tokens issued
+    // by the now-dead original host are meaningless to this (different)
+    // process. Checked before the ordinary token path below since a
+    // migration-reclaim ConnectPacket's token is always 0 (a fresh session
+    // with the new host) and would never match anyway.
+    if (packet.migrationReclaim != 0 && _migrationWindowDeadline != 0 && Platform::getTime() < _migrationWindowDeadline)
+    {
+        auto trimmedName = resolveDisplayName(std::string_view(packet.name, sizeof(packet.name)), 0);
+        auto it = std::find_if(_reservedSeats.begin(), _reservedSeats.end(),
+            [&](const ReservedSeat& seat) { return seat.name == trimmedName; });
+        if (it != _reservedSeats.end())
+        {
+            auto newClient = std::make_unique<Client>();
+            newClient->id = it->id;
+            newClient->connection = std::move(conn);
+            newClient->name = it->name;
+            newClient->company = it->company;
+            newClient->assignmentResolved = it->assignmentResolved;
+            newClient->token = generateSessionToken(); // fresh - this is a new host session
+            newClient->hostingPort = packet.hostingPort;
+
+            _reservedSeats.erase(it);
+
+            ConnectResponsePacket response;
+            response.result = ConnectionResult::success;
+            response.assignedId = newClient->id;
+            newClient->connection->sendPacket(response);
+
+            Logging::info("Client '{}' reclaimed its seat via host migration (company {})", newClient->name, static_cast<uint32_t>(newClient->company));
+
+            _clients.push_back(std::move(newClient));
+            broadcastRosterUpdate();
+            return;
+        }
+
+        // No matching seeded seat (e.g. a genuinely new player trying to
+        // join mid-migration) - fall through to the ordinary paths below
+        // rather than failing outright, same "never permanently strand a
+        // connect" philosophy as the unrecognised-token fallback.
+        Logging::info("Client presented a migration reclaim with no matching seat; treating as a fresh join");
+    }
+
     // Reclaim path (docs/multiplayer.md § Reconnect): a non-zero token that
     // matches a reserved seat means this is a returning client, not a fresh
     // join. Restore its identity/company/assignment from the reserved seat
@@ -198,11 +266,13 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
             newClient->company = it->company;
             newClient->assignmentResolved = it->assignmentResolved;
             newClient->token = it->token;
+            newClient->hostingPort = packet.hostingPort;
 
             _reservedSeats.erase(it);
 
             ConnectResponsePacket response;
             response.result = ConnectionResult::success;
+            response.assignedId = newClient->id;
             newClient->connection->sendPacket(response);
 
             Logging::info("Client '{}' reclaimed its reserved seat (company {})", newClient->name, static_cast<uint32_t>(newClient->company));
@@ -226,12 +296,14 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
     // (fixes blank-padding in "Accepted new client"/assignment log lines).
     newClient->name = resolveDisplayName(std::string_view(packet.name, sizeof(packet.name)), newClient->id);
     newClient->token = generateSessionToken();
+    newClient->hostingPort = packet.hostingPort;
     _clients.push_back(std::move(newClient));
 
     auto& newClientPtr = *_clients.back();
 
     ConnectResponsePacket response;
     response.result = ConnectionResult::success;
+    response.assignedId = newClientPtr.id;
     newClientPtr.connection->sendPacket(response);
 
     Logging::info("Accepted new client: {}", newClientPtr.name);
@@ -533,6 +605,145 @@ void NetworkServer::updateTestShutdownHook()
     close();
 }
 
+// Headless test hook (--test_kill_after <seconds>). Driven from onUpdate(),
+// same rationale as updateTestShutdownHook() above, but deliberately does
+// NOT run onClose()/send ServerClosingPacket - this simulates a genuine host
+// crash (process just vanishes), which is exactly what the host migration
+// smoke test needs to exercise the clients' auto-retry-exhausted election
+// path (a graceful serverClosing would instead make every client return to
+// title, by design - see NetworkClient::receiveServerClosingPacket).
+// std::_Exit skips destructors/atexit handlers entirely, matching a real
+// crash/kill more closely than std::exit would.
+void NetworkServer::updateTestKillAfterHook()
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testKillAfter.has_value() || _testKillTriggered)
+    {
+        return;
+    }
+
+    auto elapsedMs = Platform::getTime() - _startTime;
+    if (elapsedMs < static_cast<uint32_t>(*options.testKillAfter) * 1000)
+    {
+        return;
+    }
+
+    _testKillTriggered = true;
+
+    Logging::info("[TEST] killing host process (simulated crash)");
+    std::_Exit(0);
+}
+
+void NetworkServer::seedMigrationReservedSeats(const std::vector<PlayerRosterEntry>& lastRoster, client_id_t selfId)
+{
+    _reservedSeats.clear();
+
+    // A fresh id counter for any entry whose old id collides with something
+    // that must stay unique going forward (see the id==0 remap below), and
+    // so future fresh joins on this new server never collide with a
+    // surviving client's real id either.
+    client_id_t maxId = 0;
+    for (const auto& entry : lastRoster)
+    {
+        maxId = std::max(maxId, entry.id);
+    }
+    _nextClientId = maxId + 1;
+
+    for (const auto& entry : lastRoster)
+    {
+        if (entry.id == selfId)
+        {
+            // This is me, the newly promoted host - not a reserved seat.
+            continue;
+        }
+
+        ReservedSeat seat;
+        seat.token = 0; // migration reclaim matches by name, not token - see docs/multiplayer.md § Host migration
+        // client_id_t 0 always means "whoever is currently hosting" in the
+        // roster convention (see buildRoster()) - it is not a portable
+        // identity, so the dead original host's own former roster entry
+        // (which is id 0) is remapped to a fresh id rather than reserved
+        // under 0, which would collide with this server's own synthetic
+        // host entry.
+        seat.id = entry.id == 0 ? _nextClientId++ : entry.id;
+        seat.name = entry.name;
+        seat.company = entry.company;
+        // Every entry in a roster snapshot already has a resolved
+        // assignment (a real company or a genuine spectator - both are
+        // "resolved", never "pending"), so a migration reclaim should
+        // always skip join policy and go straight to restoring it, exactly
+        // like an ordinary token-based reconnect reclaim does.
+        seat.assignmentResolved = true;
+        _reservedSeats.push_back(std::move(seat));
+    }
+
+    _migrationWindowDeadline = Platform::getTime() + migrationWindowMs();
+    Logging::info("Host migration: seeded {} reserved seat(s), migration window open", _reservedSeats.size());
+}
+
+void NetworkServer::seedGameCommandIndex(uint32_t index)
+{
+    _gameCommandIndex = index;
+}
+
+void NetworkServer::buildMigrationPlan(MigrationPlanPacket& packet) const
+{
+    std::vector<const Client*> sorted;
+    sorted.reserve(_clients.size());
+    for (const auto& client : _clients)
+    {
+        sorted.push_back(client.get());
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const Client* a, const Client* b) { return a->id < b->id; });
+
+    packet.count = 0;
+    for (const auto* client : sorted)
+    {
+        if (packet.count >= kMaxMigrationCandidates)
+        {
+            break;
+        }
+
+        auto ipv4 = parseIpv4NetworkOrder(client->connection->getEndpoint().getIpAddress());
+        if (!ipv4.has_value())
+        {
+            // IPv6 client - out of scope for host migration v1 (mirrors the
+            // master server's existing IPv4-only limitation); simply
+            // omitted from the plan rather than failing the whole packet.
+            continue;
+        }
+
+        auto& candidate = packet.candidates[packet.count++];
+        candidate.id = client->id;
+        candidate.ipv4 = *ipv4;
+        candidate.port = client->hostingPort;
+    }
+}
+
+void NetworkServer::broadcastMigrationPlan()
+{
+    MigrationPlanPacket packet;
+    buildMigrationPlan(packet);
+    sendPacketToAll(packet);
+}
+
+void NetworkServer::updateMigrationPlanBroadcast()
+{
+    if (_clients.empty())
+    {
+        return;
+    }
+
+    auto now = Platform::getTime();
+    if (now - _lastMigrationPlanBroadcast < migrationPlanIntervalMs())
+    {
+        return;
+    }
+
+    _lastMigrationPlanBroadcast = now;
+    broadcastMigrationPlan();
+}
+
 void NetworkServer::onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet)
 {
     std::unique_lock<std::mutex> lk(_chatMessageQueueSync);
@@ -698,8 +909,10 @@ void NetworkServer::onUpdate()
     sendPings();
     removedTimedOutClients();
     updateMasterAnnounce();
+    updateMigrationPlanBroadcast();
     updateTestHostLoadHook();
     updateTestShutdownHook();
+    updateTestKillAfterHook();
 }
 
 void NetworkServer::updateClients()
@@ -756,6 +969,13 @@ void NetworkServer::broadcastRosterUpdate()
     RosterUpdatePacket packet;
     toWirePacket(buildRoster(), packet);
     sendPacketToAll(packet);
+
+    // Host migration (docs/multiplayer.md § Host migration): also refresh
+    // every client's copy of the migration plan immediately on roster
+    // change, not just on the periodic cadence - see
+    // updateMigrationPlanBroadcast().
+    broadcastMigrationPlan();
+    _lastMigrationPlanBroadcast = Platform::getTime();
 
     // Master server (docs/multiplayer.md § "Master server (phase 2 -
     // design)"): announce immediately on roster change, in addition to the

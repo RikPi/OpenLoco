@@ -96,6 +96,35 @@ namespace OpenLoco
         // other test hook). See Network.cpp's --test_discover hook and
         // KNOWLEDGEBASE.md § LAN server discovery test hook.
         bool testDiscover{};
+        // Hidden headless test hook (deliberately omitted from --help),
+        // host-side: after <seconds> of server uptime, hard-exits the
+        // process immediately (std::_Exit - no destructors, no
+        // ServerClosingPacket) to simulate a genuine host crash. Unlike
+        // --test_shutdown_after (a graceful close that deliberately
+        // suppresses client auto-retry/migration by design), this is what
+        // drives the host migration smoke test. See NetworkServer's
+        // test-kill hook and KNOWLEDGEBASE.md § Host migration test hook.
+        std::optional<int32_t> testKillAfter{};
+        // Hidden headless test hook (deliberately omitted from --help):
+        // shortens several real-time constants (connection timeout,
+        // reconnect/migration retry spacing, migration plan broadcast
+        // cadence, migration window) purely for test practicality, so the
+        // host migration smoke test resolves in well under two minutes
+        // instead of several. No effect on wire format or behaviour beyond
+        // timing. See KNOWLEDGEBASE.md § Host migration test hook.
+        bool testFastRetry{};
+        // Hidden headless test hook (deliberately omitted from --help),
+        // client-side: overrides Config::preferredOwnerName for the purpose
+        // of the ConnectPacket's name field only (never written back to the
+        // config file). Needed because every process in a headless smoke
+        // test run shares the same %APPDATA% config file, so
+        // preferredOwnerName is otherwise identical (usually empty) across
+        // every client - which the migration-reclaim smoke test needs to
+        // avoid, since ConnectPacket::migrationReclaim matches by (trimmed)
+        // name and an empty name's "Player #<id>" display fallback is
+        // id-dependent (collides across different anonymous clients). See
+        // KNOWLEDGEBASE.md § Host migration test hook.
+        std::optional<std::string> testOwnerName{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

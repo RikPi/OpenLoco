@@ -2,6 +2,7 @@
 
 #include "Types.hpp"
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -68,7 +69,27 @@ namespace OpenLoco::Network
     // discovery - never touches GameState or the game command stream, so
     // this bump exists only for consistency with the versioning scheme (no
     // wire-incompatible change to the session protocol itself).
-    constexpr uint16_t kNetworkVersion = 8;
+    // Version 9: host migration (docs/multiplayer.md § Host migration) - a
+    // new migrationPlan packet (Packet.h), broadcast by a healthy server to
+    // every client roughly every 10s and immediately on roster change: an
+    // ordered (by client id ascending) list of every OTHER client's
+    // server-observed public IPv4 address paired with that client's own
+    // advertised listen port (NOT the ephemeral UDP source port the
+    // connection was observed on - that port is not listenable). Clients
+    // just cache the latest plan. ConnectPacket gains `hostingPort` (the
+    // client's own configured network.port/--port, advertised back out in
+    // the plan) and a `migrationReclaim` flag (matches by trimmed name,
+    // rather than by token, against migration-seeded reserved seats during
+    // a promoted successor's ~60s window - tokens issued by the now-dead
+    // original host are meaningless to a different process).
+    // ConnectResponsePacket gains `assignedId`: clients previously never
+    // learned their own client_id_t at all - host migration needs it so a
+    // client can recognise its own entry in a migrationPlan (and therefore
+    // know whether it has been elected successor) by id, not by endpoint
+    // (unreliable to self-observe, especially behind NAT). See
+    // Network.cpp's election/promoteToHost() facade logic and
+    // NetworkServer::seedMigrationReservedSeats/buildMigrationPlan.
+    constexpr uint16_t kNetworkVersion = 9;
 
     /**
      * Machine-local snapshot of one player/spectator, used to drive the
@@ -109,6 +130,24 @@ namespace OpenLoco::Network
      * prompt, and the master server host/query endpoints).
      */
     std::pair<std::string, port_t> parseServerAddress(std::string_view input, port_t defaultPort = kDefaultPort);
+
+    /**
+     * Parses a dotted-decimal IPv4 address string (e.g. from
+     * INetworkEndpoint::getIpAddress()) into a network-byte-order uint32 (the
+     * first octet is the most significant byte) - the wire representation
+     * used by MigrationCandidate::ipv4 (Packet.h, docs/multiplayer.md § Host
+     * migration). Returns std::nullopt for anything that is not a valid
+     * dotted quad (e.g. an IPv6 address) - host migration is IPv4-only in
+     * v1, mirroring the master server's existing IPv4-only limitation.
+     */
+    std::optional<uint32_t> parseIpv4NetworkOrder(std::string_view address);
+
+    /**
+     * Inverse of parseIpv4NetworkOrder: formats a network-byte-order ipv4
+     * value back into a dotted-decimal string suitable as a joinServer() host
+     * argument.
+     */
+    std::string formatIpv4NetworkOrder(uint32_t ipv4);
 
     void openServer();
     bool joinServer(std::string_view host);

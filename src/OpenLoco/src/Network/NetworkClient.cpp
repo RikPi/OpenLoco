@@ -62,6 +62,31 @@ bool NetworkClient::shouldAutoRetry() const
     return _eligibleForAutoRetry || _isReconnectAttempt;
 }
 
+bool NetworkClient::wasRejectedPermanently() const
+{
+    return _suppressAutoRetry;
+}
+
+void NetworkClient::setMigrationReclaim()
+{
+    _migrationReclaim = true;
+}
+
+client_id_t NetworkClient::getMyId() const
+{
+    return _myId;
+}
+
+const std::vector<MigrationCandidate>& NetworkClient::getMigrationPlan() const
+{
+    return _migrationPlan;
+}
+
+uint32_t NetworkClient::getLocalGameCommandIndex() const
+{
+    return _localGameCommandIndex;
+}
+
 namespace
 {
     // Cached on first use: a stable reference point for --test_blackhole
@@ -230,7 +255,11 @@ void NetworkClient::connect(std::string_view host, port_t port)
     beginReceivePacketLoop();
 
     _status = NetworkClientStatus::connecting;
-    _timeout = Platform::getTime() + 5000;
+    // --test_fast_retry (CommandLine.h): shortens the initial "connecting"
+    // timeout too, so a reconnect/migration-reclaim attempt against an
+    // endpoint that never answers fails quickly instead of taking the full
+    // default 5s per attempt. No effect on default behaviour/timing.
+    _timeout = Platform::getTime() + (getCommandLineOptions().testFastRetry ? 1500 : 5000);
 
     sendConnectPacket();
 
@@ -398,9 +427,22 @@ void NetworkClient::onReceivePacketFromServer(const Packet& packet)
         case PacketKind::resyncRequired:
             receiveResyncRequiredPacket(*reinterpret_cast<const ResyncRequiredPacket*>(packet.data));
             break;
+        case PacketKind::migrationPlan:
+            receiveMigrationPlanPacket(*reinterpret_cast<const MigrationPlanPacket*>(packet.data));
+            break;
         default:
             break;
     }
+}
+
+void NetworkClient::receiveMigrationPlanPacket(const MigrationPlanPacket& packet)
+{
+    // Passive cache only (docs/multiplayer.md § Host migration) - consulted
+    // by the facade solely at the moment auto-retry against a dead host is
+    // exhausted (see getMigrationPlan()); never mutates GameState or the
+    // game command stream.
+    auto count = std::min<uint8_t>(packet.count, static_cast<uint8_t>(kMaxMigrationCandidates));
+    _migrationPlan.assign(packet.candidates, packet.candidates + count);
 }
 
 void NetworkClient::receiveResyncRequiredPacket([[maybe_unused]] const ResyncRequiredPacket& packet)
@@ -421,13 +463,26 @@ void NetworkClient::receiveResyncRequiredPacket([[maybe_unused]] const ResyncReq
 void NetworkClient::sendConnectPacket()
 {
     const auto& config = Config::get();
+    const auto& cmdlineOptions = getCommandLineOptions();
     ConnectPacket packet;
-    std::strncpy(packet.name, config.preferredOwnerName.c_str(), sizeof(packet.name));
+    // --test_owner_name (CommandLine.h) wins over the shared config file's
+    // preferredOwnerName when set - see its declaration for why a headless
+    // multi-client test needs this.
+    const auto& ownerName = cmdlineOptions.testOwnerName.has_value() ? *cmdlineOptions.testOwnerName : config.preferredOwnerName;
+    std::strncpy(packet.name, ownerName.c_str(), sizeof(packet.name));
     packet.version = kNetworkVersion;
     // 0 (the default until a CompanyAssignmentPacket sets it) means "fresh
     // join"; a non-zero value asks the server to reclaim a reserved seat
     // (docs/multiplayer.md § Reconnect).
     packet.token = _token;
+    // Host migration (docs/multiplayer.md § Host migration): this machine's
+    // own configured server/listen port - same CLI/config precedence
+    // openServer()/promoteToHost() use - advertised so a server can include
+    // us in its migrationPlan with a real, connectable endpoint. Sent on
+    // every connect, not just when hosting, since any client may later be
+    // elected migration successor.
+    packet.hostingPort = cmdlineOptions.port.value_or(config.network.port != 0 ? config.network.port : kDefaultPort);
+    packet.migrationReclaim = _migrationReclaim ? 1 : 0;
     _serverConnection->sendPacket(packet);
 }
 
@@ -448,6 +503,10 @@ void NetworkClient::receiveConnectionResponsePacket(const ConnectResponsePacket&
         _status = NetworkClientStatus::connectedSuccessfully;
         setStatus("Connected to server successfully");
         SceneManager::addSceneFlags(SceneManager::Flags::networked);
+        // Host migration (docs/multiplayer.md § Host migration): the first
+        // (and only) time this client learns its own client_id_t - needed
+        // to recognise itself in a migrationPlan later.
+        _myId = response.assignedId;
     }
     else
     {

@@ -302,8 +302,8 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
         reconnect (via the same restored-field mechanism) rather than being
         specially skipped - a deliberate reuse of existing code rather than a
         new branch, and arguably the more correct behaviour for that edge
-        case. Host migration remains explicitly out of scope (per the design
-        doc) and was not addressed.
+        case. Host migration was out of scope for this design (superseded -
+        see Milestone 4 below and docs/multiplayer.md § Host migration).
 
 ## Milestone 3: lobby (phase 1 — LAN server discovery)
 
@@ -451,6 +451,145 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       sorted by LastWriteTime (unstable — whoever flushed last); now
       sorted by filename (embedded creation timestamp).
 
+## Milestone 4: host migration
+
+- [x] **Host migration** (design: `docs/multiplayer.md` § Host migration).
+      Network version bumped to 9. When the host dies, the remaining clients
+      continue the session under a new host instead of falling back to the
+      title screen:
+      - `migrationPlan` packet (new `PacketKind`, `Packet.h`): server→clients,
+        an ordered (by client id ascending) list of `MigrationCandidate{
+        client_id_t id; uint32_t ipv4 (network byte order); uint16_t port }`,
+        broadcast roughly every 10s and immediately on roster change
+        (`NetworkServer::broadcastMigrationPlan`/`updateMigrationPlanBroadcast`).
+        Clients previously never learned their own `client_id_t` at all -
+        `ConnectResponsePacket` gained `assignedId` so a client can recognise
+        its own entry in the plan. `ConnectPacket` gained `hostingPort` (the
+        client's own configured `network.port`/`--port`, sent on every
+        connect) since the server can only ever observe a client's
+        *ephemeral* source port, which is not listenable - the plan
+        advertises `hostingPort` instead, the client's real future server
+        port. `ConnectPacket` also gained a `migrationReclaim` flag (u8): a
+        reclaim variant of the connect flow matching by (trimmed name, any
+        company) against migration-seeded reserved seats, gated to a
+        promoted successor's ~60s migration window, instead of by token
+        (tokens issued by the now-dead original host are meaningless to a
+        different process).
+      - Detection/election (`Network.cpp` facade, alongside the existing
+        reconnect retry state): once ordinary auto-retry against the dead
+        host is exhausted (5 attempts), a `MigrationState` captured at the
+        moment the connection was first lost (last received `migrationPlan`,
+        own id, last roster snapshot, last applied game command index -
+        mirrors how `ReconnectState` already had to survive the
+        `NetworkClient`'s own destruction) is consulted: successor = the
+        first plan entry (plans only ever list clients, never the host, and
+        are id-ordered, so this is simply `plan.front()`), computed
+        identically and independently by every remaining peer. If
+        `successor.id == myId`, `promoteToHost()`; otherwise wait ~5s
+        (`MigrationReclaimState`, a retry episode independent of the
+        ordinary one, fresh attempt budget) then reclaim-join the
+        successor's advertised endpoint with `migrationReclaim = 1`.
+      - `promoteToHost()` (`Network.cpp` facade): opens a `NetworkServer` on
+        the locally configured bind/port (`resolveHostBindPort()`, factored
+        out of `openServer()` and reused here), seeds reserved seats from the
+        client's last roster snapshot (`NetworkServer::
+        seedMigrationReservedSeats` - every OTHER entry, token 0; the dead
+        original host's own former roster id (always 0, a synthetic "whoever
+        is hosting now" convention, not a portable identity) is remapped to
+        a fresh id so it doesn't collide with this server's own synthetic
+        host-id-0 roster entry), seeds `_gameCommandIndex` from the client's
+        last applied index (`NetworkServer::seedGameCommandIndex` -
+        determinism guard: a promoted host's command stream must continue
+        exactly where every surviving peer already agrees, not restart at
+        0), and deliberately does NOT touch the human-company mask or any
+        `GameState` (same world every peer already shares, not a freshly
+        loaded one). Reuses `NetworkServer::listen()`'s existing scene-flag
+        and master-server-announce logic unchanged - promotion is a normal
+        `listen()` call plus seeding.
+      - `NetworkServer::createNewClient()` gained a migration-reclaim branch
+        (checked before the ordinary token-reclaim branch): while
+        `Platform::getTime() < _migrationWindowDeadline`, a
+        `migrationReclaim` connect matches by trimmed name against
+        `_reservedSeats`, restores company/assignmentResolved, and issues a
+        fresh token; falls through to an ordinary fresh join if no seat
+        matches (same "never permanently strand a connect" philosophy as the
+        existing unrecognised-token fallback).
+      - Headless test hooks (both hidden, `CommandLine.h`/`.cpp`): host-side
+        `--test_kill_after <seconds>` hard-exits the process (`std::_Exit`,
+        no destructors, no `ServerClosingPacket`) to simulate a genuine
+        crash - deliberately distinct from `--test_shutdown_after`, whose
+        graceful `serverClosing` suppresses client auto-retry/migration by
+        design. `--test_fast_retry` (either side) shortens the connection
+        timeout, reconnect/migration-reclaim retry spacing, migration plan
+        broadcast cadence and migration window purely for test practicality
+        (no effect on wire format/behaviour beyond timing; default behaviour
+        is unchanged without the flag - verified by the `-TestReconnect`
+        regression run below, which does not pass it and behaves exactly as
+        before). `--test_owner_name <name>` (client-side) overrides
+        `Config::preferredOwnerName` for the `ConnectPacket` only - needed
+        because every headless smoke-test process shares one `%APPDATA%`
+        config file, so an unset `preferredOwnerName` resolves to the same
+        id-dependent "Player #\<id\>" fallback for every anonymous client,
+        which defeats migration reclaim's name-based matching; found and
+        fixed during verification (see below).
+      - `scripts\run_sync_smoke_test.ps1` gained `-TestMigration`: host +
+        clientA + clientB (clientB starts ~5s after clientA, both with
+        `--test_fast_retry` and distinct `--test_owner_name`), host hard-
+        crashes via `--test_kill_after 25` (also `--test_fast_retry`) ~25s
+        in; asserts both clients reached gameplay and got their initial
+        company assignment, exactly one `Promoted to session host` line
+        (clientA, the lower id), clientB logs `Host migration: reclaim
+        successful` and ends up re-assigned the SAME company it had before
+        the crash, plus the standard zero-`[ERR]`/desync check across all
+        three logs and only clientA+clientB (not the host, which is
+        *supposed* to have died) required alive at the end. Enforces
+        `-RunSeconds >= 120` and `-JoinPolicy own`/`coop`.
+      - Verified end-to-end headless (own policy, 120s run, real
+        `--test_kill_after` crash): host logs `Accepted new client: ClientA`
+        / `Accepted new client: ClientB` / `[TEST] killing host process
+        (simulated crash)`; clientA (successor) logs `Connection with server
+        timed out` → 5× `Reconnecting (attempt N)...` → `Host migration:
+        electing self (client 1) as successor host` → `Server opened` →
+        `Host migration: seeded 2 reserved seat(s), migration window open` →
+        `Promoted to session host` → `Client 'ClientB' reclaimed its seat
+        via host migration (company 2)`; clientB logs the same 5 retries →
+        `Host migration: electing client 1 as successor host; will attempt
+        to rejoin` → `Host migration: attempting to rejoin successor host
+        (attempt 1)...` → `Assigned company 2` (same company as its original
+        assignment) → `Host migration: reclaim successful`; zero
+        `[ERR]`/desync lines across all three logs for the whole run.
+        Regressions: full clean build (App + OpenLocoTests), ctest 152/152;
+        `-TestRename` (own policy) and `-TestReconnect` smoke tests both
+        still PASS unchanged (the latter specifically confirms plain
+        reconnect - a still-alive host - never triggers migration logic,
+        since it never exhausts the retry budget).
+      - Two bugs found and fixed during verification (both caught by the
+        first `-TestMigration` run, not by code review): (1)
+        `NetworkClient::connect()`'s initial "connecting" timeout was never
+        wired to `--test_fast_retry` (only the separately-tracked connection
+        timeout and reconnect spacing were), making early retry attempts
+        take the full default 5s each; (2) the headless fixture's shared,
+        empty `preferredOwnerName` made every anonymous client's display
+        name resolve to the same id-dependent "Player #\<id\>" fallback,
+        which broke migration reclaim's by-name matching the first time two
+        *different* anonymous clients needed genuinely distinct identities
+        (ordinary token-based reconnect never hit this, since it doesn't
+        match by name) - fixed with the new `--test_owner_name` hook rather
+        than any production-path change.
+      - Known deviations/limitations (documented, not fixed - out of scope
+        for v1 per the design doc): the returning original host, if it
+        reclaims within the window, is remapped to a fresh id (not literally
+        id 0) to avoid colliding with the promoted server's own synthetic
+        roster id 0 - not exercised by the smoke test. Both the dead
+        original host and a promoted client with an empty/unset
+        `preferredOwnerName` display identically as "Player #0" in a
+        post-migration roster listing (cosmetic only - each is still a
+        distinct entry with its own client id/company; observed in the
+        verification log, does not affect any assertion). IPv6-connected
+        clients are omitted from the migration plan (v1 is IPv4-only,
+        mirroring the master server's existing limitation). See
+        KNOWLEDGEBASE.md § Host migration for full implementation notes.
+
 ## Backlog
 
 - [x] Scripted smoke test: `scripts/run_sync_smoke_test.ps1` (gensave →
@@ -544,8 +683,8 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       falling back to "Player #N" only if the roster doesn't have the
       sender yet.
 - [x] Reconnect - done, see Milestone 2 above and KNOWLEDGEBASE.md § Reconnect
-      implementation notes / § Reconnect test hook. Host migration remains
-      explicitly out of scope per the design doc and is not addressed.
+      implementation notes / § Reconnect test hook. Host migration - done,
+      see Milestone 4 above.
 - [ ] Lobby & server browser — phase 1 (LAN discovery) done, see the
       completed "LAN server discovery" item below. Phase 2 (internet master
       server): COMPLETE — Go service + game-side integration both done (see

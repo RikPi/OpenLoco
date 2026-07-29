@@ -316,7 +316,10 @@ namespace OpenLoco
                           .registerOption("--test_host_load", 1)
                           .registerOption("--test_shutdown_after", 1)
                           .registerOption("--test_blackhole", 1)
-                          .registerOption("--test_discover");
+                          .registerOption("--test_discover")
+                          .registerOption("--test_kill_after", 1)
+                          .registerOption("--test_fast_retry")
+                          .registerOption("--test_owner_name", 1);
 
         if (!parser.parse())
         {
@@ -482,6 +485,18 @@ namespace OpenLoco
         }
 
         options.testDiscover = parser.hasOption("--test_discover");
+
+        if (parser.hasOption("--test_kill_after"))
+        {
+            options.testKillAfter = parser.getArg<int32_t>("--test_kill_after");
+        }
+
+        options.testFastRetry = parser.hasOption("--test_fast_retry");
+
+        if (parser.hasOption("--test_owner_name"))
+        {
+            options.testOwnerName = std::string(parser.getArg("--test_owner_name"));
+        }
 
         return options;
     }

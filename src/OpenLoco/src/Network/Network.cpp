@@ -103,6 +103,66 @@ namespace OpenLoco::Network
         return { std::string(host), port };
     }
 
+    std::optional<uint32_t> parseIpv4NetworkOrder(std::string_view address)
+    {
+        uint32_t octets[4]{};
+        size_t octetIndex = 0;
+        size_t segmentStart = 0;
+
+        for (size_t i = 0; i <= address.size(); i++)
+        {
+            if (i < address.size() && address[i] != '.')
+            {
+                continue;
+            }
+
+            if (octetIndex >= 4)
+            {
+                return std::nullopt;
+            }
+
+            auto segment = address.substr(segmentStart, i - segmentStart);
+            if (segment.empty() || segment.size() > 3)
+            {
+                return std::nullopt;
+            }
+
+            uint32_t value = 0;
+            for (auto c : segment)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return std::nullopt;
+                }
+                value = value * 10 + static_cast<uint32_t>(c - '0');
+            }
+            if (value > 255)
+            {
+                return std::nullopt;
+            }
+
+            octets[octetIndex++] = value;
+            segmentStart = i + 1;
+        }
+
+        if (octetIndex != 4)
+        {
+            return std::nullopt;
+        }
+
+        return (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    }
+
+    std::string formatIpv4NetworkOrder(uint32_t ipv4)
+    {
+        return fmt::format(
+            "{}.{}.{}.{}",
+            (ipv4 >> 24) & 0xFFu,
+            (ipv4 >> 16) & 0xFFu,
+            (ipv4 >> 8) & 0xFFu,
+            ipv4 & 0xFFu);
+    }
+
     bool toWirePacket(const std::vector<PlayerRosterEntry>& roster, RosterUpdatePacket& packet)
     {
         if (roster.size() > kMaxRosterEntries)
@@ -240,6 +300,68 @@ namespace OpenLoco::Network
     };
     static ReconnectState _reconnect;
 
+    // --- Host migration (docs/multiplayer.md § Host migration) --------------
+    //
+    // Bookkeeping captured from a NetworkClient at the exact moment its
+    // connection is first lost (see tick() below) - the same "must survive
+    // the object's destruction" reasoning as ReconnectState above. Only
+    // consulted once ordinary auto-retry (kMaxReconnectAttempts against the
+    // same, presumably-dead, host) is exhausted.
+    struct MigrationState
+    {
+        std::vector<MigrationCandidate> plan;
+        client_id_t myId{};
+        std::vector<PlayerRosterEntry> lastRoster;
+        uint32_t lastGameCommandIndex{};
+    };
+    static MigrationState _migration;
+
+    // A separate retry episode from ReconnectState: once a successor has
+    // been elected and it isn't us, we rejoin ITS endpoint (not the dead
+    // host's) with a fresh attempt budget and ConnectPacket::migrationReclaim
+    // set.
+    struct MigrationReclaimState
+    {
+        bool active{};
+        std::string host;
+        port_t port{};
+        int attempts{};
+        uint32_t nextAttemptTime{};
+    };
+    static MigrationReclaimState _migrationReclaim;
+
+    constexpr int kMaxMigrationReclaimAttempts = 5;
+    // ~5s: the design's assumed successor boot time before it's worth trying
+    // to connect. --test_fast_retry shortens this for test practicality only.
+    constexpr uint32_t kMigrationReclaimDelayMs = 5000;
+    constexpr uint32_t kFastMigrationReclaimDelayMs = 1000;
+
+    static uint32_t reconnectIntervalMs()
+    {
+        return getCommandLineOptions().testFastRetry ? 1000 : kReconnectIntervalMs;
+    }
+
+    static uint32_t migrationReclaimDelayMs()
+    {
+        return getCommandLineOptions().testFastRetry ? kFastMigrationReclaimDelayMs : kMigrationReclaimDelayMs;
+    }
+
+    // Shared by openServer() and promoteToHost(): CLI --bind/--port win when
+    // supplied, otherwise fall back to the config values.
+    static std::pair<std::string, port_t> resolveHostBindPort()
+    {
+        const auto& cmdlineOptions = getCommandLineOptions();
+        const auto& networkConfig = Config::get().network;
+        auto bind = !cmdlineOptions.bind.empty() ? cmdlineOptions.bind : networkConfig.bind;
+        auto port = cmdlineOptions.port.value_or(networkConfig.port != 0 ? networkConfig.port : kDefaultPort);
+        return { std::move(bind), port };
+    }
+
+    // Forward declarations: beginMigrationOrGiveUp() (defined further down,
+    // alongside the rest of the reconnect machinery it extends) calls both.
+    static void promoteToHost();
+    static void attemptMigrationReclaim();
+
     static NetworkBase* getServerOrClient()
     {
         switch (_mode)
@@ -307,7 +429,115 @@ namespace OpenLoco::Network
             _client = nullptr;
         }
 
-        _reconnect.nextAttemptTime = Platform::getTime() + kReconnectIntervalMs;
+        _reconnect.nextAttemptTime = Platform::getTime() + reconnectIntervalMs();
+    }
+
+    // Host migration (docs/multiplayer.md § Host migration). Called once
+    // ordinary auto-retry against the dead host is exhausted. Every
+    // remaining peer computes this identically and independently: the
+    // successor is simply the first entry of the last known plan (plans
+    // only ever list clients, never the host, and are ordered by id
+    // ascending).
+    static void beginMigrationOrGiveUp()
+    {
+        if (_migration.plan.empty())
+        {
+            // No plan was ever received (e.g. this client connected and lost
+            // the host again before the first ~10s broadcast) - nothing to
+            // elect from; fall back to the pre-migration behaviour.
+            _migration = {};
+            giveUpReconnecting();
+            return;
+        }
+
+        const auto& successor = _migration.plan.front();
+        if (successor.id == _migration.myId)
+        {
+            Logging::info("Host migration: electing self (client {}) as successor host", static_cast<uint32_t>(_migration.myId));
+            promoteToHost();
+        }
+        else
+        {
+            Logging::info("Host migration: electing client {} as successor host; will attempt to rejoin", static_cast<uint32_t>(successor.id));
+            showReconnectStatus("Host lost; rejoining new host shortly...");
+
+            _migrationReclaim.active = true;
+            _migrationReclaim.host = formatIpv4NetworkOrder(successor.ipv4);
+            _migrationReclaim.port = successor.port;
+            _migrationReclaim.attempts = 0;
+            _migrationReclaim.nextAttemptTime = Platform::getTime() + migrationReclaimDelayMs();
+
+            _migration = {};
+        }
+
+        _reconnect = {};
+    }
+
+    // Host migration: this client was elected successor. Opens a
+    // NetworkServer on the locally configured port and seeds it from the
+    // last roster/game-command-index this (about-to-be-replaced) client
+    // instance observed. Deliberately does NOT touch the human-company mask
+    // or GameState in any way - this is the exact same world every peer
+    // already shares, not a freshly loaded one (docs/multiplayer.md § Host
+    // migration determinism guard).
+    static void promoteToHost()
+    {
+        assert(_mode == NetworkMode::none);
+
+        auto roster = std::move(_migration.lastRoster);
+        auto myId = _migration.myId;
+        auto gameCommandIndex = _migration.lastGameCommandIndex;
+        _migration = {};
+
+        try
+        {
+            auto [bind, port] = resolveHostBindPort();
+
+            auto server = std::make_unique<NetworkServer>();
+            server->listen(bind, port);
+            server->seedMigrationReservedSeats(roster, myId);
+            server->seedGameCommandIndex(gameCommandIndex);
+
+            _server = std::move(server);
+            _mode = NetworkMode::server;
+
+            Ui::Windows::NetworkStatus::close();
+            Gfx::invalidateScreen();
+            Logging::info("Promoted to session host");
+        }
+        catch (const std::exception& e)
+        {
+            Logging::error("Host migration: failed to promote to session host: {}", e.what());
+            Ui::Windows::NetworkStatus::close();
+            SceneManager::requestScene(SceneManager::SceneId::title);
+        }
+    }
+
+    // Host migration: creates a fresh NetworkClient targeting the elected
+    // successor's endpoint (not the original, dead host), with
+    // migrationReclaim set so the successor matches it by name against its
+    // seeded reserved seats. Mirrors attemptReconnect()'s shape with an
+    // independent attempt budget/endpoint.
+    static void attemptMigrationReclaim()
+    {
+        _migrationReclaim.attempts++;
+        Logging::info("Host migration: attempting to rejoin successor host (attempt {})...", _migrationReclaim.attempts);
+        showReconnectStatus(fmt::format("Rejoining new host (attempt {}/{})...", _migrationReclaim.attempts, kMaxMigrationReclaimAttempts));
+
+        try
+        {
+            auto client = std::make_unique<NetworkClient>();
+            client->setMigrationReclaim();
+            client->connect(_migrationReclaim.host, _migrationReclaim.port);
+            _client = std::move(client);
+            _mode = NetworkMode::client;
+        }
+        catch (...)
+        {
+            _client = nullptr;
+        }
+
+        _migrationReclaim.nextAttemptTime = Platform::getTime() + migrationReclaimDelayMs();
     }
 
     // --- LAN discovery headless test hook (--test_discover) -----------------
@@ -385,10 +615,7 @@ namespace OpenLoco::Network
             // CLI --bind/--port win when supplied (unchanged CLI behaviour);
             // otherwise fall back to the config values so UI-initiated
             // hosting isn't stuck with the CLI-only defaults.
-            const auto& cmdlineOptions = getCommandLineOptions();
-            const auto& networkConfig = Config::get().network;
-            const auto& bind = !cmdlineOptions.bind.empty() ? cmdlineOptions.bind : networkConfig.bind;
-            auto port = cmdlineOptions.port.value_or(networkConfig.port != 0 ? networkConfig.port : kDefaultPort);
+            auto [bind, port] = resolveHostBindPort();
 
             _server = std::make_unique<NetworkServer>();
             _server->listen(bind, port);
@@ -447,6 +674,8 @@ namespace OpenLoco::Network
         _client = nullptr;
         _mode = NetworkMode::none;
         _reconnect = {};
+        _migration = {};
+        _migrationReclaim = {};
         _joinHost.clear();
         _joinPort = 0;
     }
@@ -474,9 +703,39 @@ namespace OpenLoco::Network
                 _reconnect = {};
             }
 
+            // Host migration (docs/multiplayer.md § Host migration): a
+            // reclaim episode ends the same way, once the fresh connection
+            // to the successor host is fully established.
+            if (_migrationReclaim.active && _mode == NetworkMode::client && _client->getStatus() == NetworkClientStatus::connected)
+            {
+                Logging::info("Host migration: reclaim successful");
+                _migrationReclaim = {};
+            }
+
             if (serverOrClient->isClosed())
             {
-                if (_mode == NetworkMode::client && _client->shouldAutoRetry())
+                if (_mode == NetworkMode::client && _migrationReclaim.active)
+                {
+                    // This migration-reclaim attempt itself failed to
+                    // (re)establish a connection to the successor host -
+                    // retry against the same endpoint with a fresh attempt
+                    // budget already ticking (see attemptMigrationReclaim()),
+                    // unless it was explicitly, permanently rejected or the
+                    // budget is exhausted.
+                    bool giveUp = _client->wasRejectedPermanently() || _migrationReclaim.attempts >= kMaxMigrationReclaimAttempts;
+                    _client = nullptr;
+                    _mode = NetworkMode::none;
+
+                    if (giveUp)
+                    {
+                        Logging::error("Host migration: could not rejoin the successor host after {} attempt(s); giving up", _migrationReclaim.attempts);
+                        _migrationReclaim = {};
+                        Ui::Windows::NetworkStatus::close();
+                        SceneManager::requestScene(SceneManager::SceneId::title);
+                        close();
+                    }
+                }
+                else if (_mode == NetworkMode::client && _client->shouldAutoRetry())
                 {
                     // Either the first time an established connection has
                     // timed out (not a failed initial connect, not a
@@ -491,6 +750,17 @@ namespace OpenLoco::Network
                     {
                         _reconnect.active = true;
                         _reconnect.attempts = 0;
+
+                        // Host migration (docs/multiplayer.md § Host
+                        // migration): capture the last-known migration plan
+                        // and roster too, but only at the moment the
+                        // connection is FIRST lost - later, failed retry
+                        // attempts against the same (presumably still dead)
+                        // host never receive a fresher one.
+                        _migration.plan = _client->getMigrationPlan();
+                        _migration.myId = _client->getMyId();
+                        _migration.lastRoster = _client->getRoster();
+                        _migration.lastGameCommandIndex = _client->getLocalGameCommandIndex();
                     }
                     _reconnect.token = _client->getToken();
                     _client = nullptr;
@@ -498,11 +768,11 @@ namespace OpenLoco::Network
 
                     if (_reconnect.attempts >= kMaxReconnectAttempts)
                     {
-                        giveUpReconnecting();
+                        beginMigrationOrGiveUp();
                     }
                     else
                     {
-                        _reconnect.nextAttemptTime = Platform::getTime() + kReconnectIntervalMs;
+                        _reconnect.nextAttemptTime = Platform::getTime() + reconnectIntervalMs();
                     }
                 }
                 else
@@ -514,6 +784,10 @@ namespace OpenLoco::Network
         else if (_reconnect.active && Platform::getTime() >= _reconnect.nextAttemptTime)
         {
             attemptReconnect();
+        }
+        else if (_migrationReclaim.active && Platform::getTime() >= _migrationReclaim.nextAttemptTime)
+        {
+            attemptMigrationReclaim();
         }
     }
 

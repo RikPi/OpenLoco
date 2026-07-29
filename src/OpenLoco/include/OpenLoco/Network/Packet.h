@@ -40,6 +40,10 @@ namespace OpenLoco::Network
         masterAnnounce,
         masterQuery,
         masterServerList,
+        // Host migration (docs/multiplayer.md § Host migration): appended
+        // last so the master-server service's hard-coded 18/19/20 values
+        // above are never disturbed.
+        migrationPlan,
     };
 
     struct PacketHeader
@@ -98,6 +102,23 @@ namespace OpenLoco::Network
         // reserved seat reclaims that seat's identity/company instead of
         // running the normal join policy.
         uint64_t token{};
+        // Host migration (docs/multiplayer.md § Host migration): this
+        // client's OWN configured server/listen port (network.port /
+        // --port) - NOT the ephemeral UDP source port this connection is
+        // observed coming from (that port is not bound/listenable on this
+        // client). The server echoes this value back out in
+        // MigrationCandidate::port so that, if this client is ever elected
+        // migration successor, every other peer knows a real, connectable
+        // endpoint for it.
+        uint16_t hostingPort{};
+        // 1 = this connect is a migration-reclaim attempt against a session
+        // successor host (docs/multiplayer.md § Host migration): match by
+        // (trimmed name, any company) against migration-seeded reserved
+        // seats while that host's migration window is open, instead of by
+        // `token` above (tokens issued by the now-dead original host are
+        // meaningless to a different process). 0 = an ordinary connect
+        // (fresh join, or token-based reclaim per `token`).
+        uint8_t migrationReclaim{};
     };
 
     enum class ConnectionResult
@@ -113,6 +134,14 @@ namespace OpenLoco::Network
 
         ConnectionResult result;
         char message[256]{};
+        // This client's own client_id_t, valid only when result == success.
+        // Clients previously never learned their own id at all; host
+        // migration (docs/multiplayer.md § Host migration) needs it so a
+        // client can recognise its own entry in a migrationPlan (and hence
+        // know whether it has been elected successor) by id, since it
+        // cannot reliably self-observe its endpoint (especially behind
+        // NAT).
+        client_id_t assignedId{};
     };
 
     struct RequestStatePacket
@@ -424,6 +453,49 @@ namespace OpenLoco::Network
         MasterServerListEntry entries[kMaxMasterServerListEntries]{};
     };
     static_assert(sizeof(MasterServerListPacket) <= kMaxPacketDataSize);
+
+    /**
+     * One migration successor candidate (docs/multiplayer.md § Host
+     * migration): a currently-connected client's server-observed public
+     * IPv4 address, paired with that client's own FUTURE listen port
+     * (ConnectPacket::hostingPort) - NOT the ephemeral source port the
+     * connection was observed on, which is not listenable. IPv4 only in v1
+     * (mirrors MasterServerListEntry's existing IPv4-only limitation) - an
+     * IPv6-connected client is simply omitted from the plan rather than
+     * failing the whole packet.
+     */
+    struct MigrationCandidate
+    {
+        client_id_t id{};
+        // Network byte order: the first octet (the '1' in "1.2.3.4") is the
+        // most significant byte - see Network::parseIpv4NetworkOrder /
+        // Network::formatIpv4NetworkOrder.
+        uint32_t ipv4{};
+        uint16_t port{};
+    };
+
+    constexpr size_t kMaxMigrationCandidates = kMaxRosterEntries;
+
+    /**
+     * Broadcast by the server to every client roughly every 10s and
+     * immediately on roster change (docs/multiplayer.md § Host migration),
+     * while the server is healthy. An ordered (by client id ascending -
+     * deterministic) list of every OTHER client's public endpoint. Clients
+     * only ever consult their last received plan after their own auto-retry
+     * (see docs/multiplayer.md § Reconnect) has been exhausted, to elect a
+     * successor host and/or find where to rejoin. Never touches GameState
+     * or the game command stream. Follows the same "reserve the max, send
+     * only what's used" pattern as RosterUpdatePacket.
+     */
+    struct MigrationPlanPacket
+    {
+        static constexpr PacketKind kind = PacketKind::migrationPlan;
+        size_t size() const { return reinterpret_cast<size_t>(this->candidates + count) - reinterpret_cast<size_t>(this); }
+
+        uint8_t count{};
+        MigrationCandidate candidates[kMaxMigrationCandidates]{};
+    };
+    static_assert(sizeof(MigrationPlanPacket) <= kMaxPacketDataSize);
 
     /**
      * Wire form of a game command. The argument payload is the portable

@@ -27,6 +27,13 @@ client on loopback, lets them run, then asserts from the file logs that:
     (also never joining) queries it and logs a master-sourced discovery
     line -- proves the internet-wide server list integration end-to-end
     without relying on LAN discovery (the host uses a non-default port)
+  - (with -TestMigration) host + clientA + clientB (clientB joins ~5s after
+    clientA); the host hard-crashes (--test_kill_after) ~25s in; both
+    clients independently exhaust auto-retry against the dead host, elect
+    the same successor (clientA - lower client id), clientA promotes itself
+    to session host in-process (no new game process), and clientB reclaims
+    its pre-crash company by name against clientA's new server -- proves
+    host migration end-to-end (election, promotion, reclaim, no desync)
 
 Requires: a built tree (windows-release preset), the stub install dir
 (fake-locomotion with Data\g1.DAT), allow_multiple_instances: true in the
@@ -114,7 +121,28 @@ param(
     # enough time for the ~10s discovery window plus process startup;
     # enforced below (>= 20). Not meaningful combined with the other -Test*
     # switches.
-    [switch]$TestMaster
+    [switch]$TestMaster,
+    # Exercise host migration end-to-end (docs/multiplayer.md § Host
+    # migration): starts a THIRD process, clientB, ~5s after the normal
+    # client (clientA) joins. Both clients run with --test_fast_retry
+    # (shortens connection-timeout/retry/migration-plan/window constants for
+    # test practicality only -- no wire/behavioural change beyond timing);
+    # the host additionally gets --test_kill_after 25 (hard std::_Exit,
+    # simulating a genuine crash -- deliberately NOT --test_shutdown_after,
+    # which sends a graceful serverClosing that suppresses client
+    # auto-retry/migration by design) and --test_fast_retry too (shortens
+    # its migration-plan broadcast cadence so both clients have a fresh plan
+    # well before it dies). Both clients independently exhaust ordinary
+    # auto-retry against the dead host, then elect the same successor from
+    # their last received migrationPlan (clientA, the lower client id, since
+    # it joined first): clientA promotes itself to session host in-process
+    # (the facade just swaps its NetworkClient for a NetworkServer -- no new
+    # game process is spawned), and clientB reclaims its pre-crash company
+    # by name against clientA's freshly seeded reserved seats. Needs enough
+    # time for detection+retries+election+reclaim plus a stability margin
+    # afterwards; enforced below (>= 120). Requires -JoinPolicy own or coop.
+    # Not meaningful combined with the other -Test* switches.
+    [switch]$TestMigration
 )
 
 # Only used when -TestMaster is passed. Not on PATH on this machine - see
@@ -183,11 +211,11 @@ function Set-TitleSequenceFlag([string]$path)
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
-$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent, $TestDiscovery.IsPresent, $TestMaster.IsPresent)
+$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent, $TestDiscovery.IsPresent, $TestMaster.IsPresent, $TestMigration.IsPresent)
 $exclusiveSwitchCount = ($testHookFlags | Where-Object { $_ }).Count
 if ($exclusiveSwitchCount -gt 1)
 {
-    Fail 'TestRename, TestHostLoad, TestShutdown, TestReconnect, TestDiscovery and TestMaster are mutually exclusive -- run each in its own invocation'
+    Fail 'TestRename, TestHostLoad, TestShutdown, TestReconnect, TestDiscovery, TestMaster and TestMigration are mutually exclusive -- run each in its own invocation'
 }
 
 if ($TestHostLoad -and $RunSeconds -lt 50)
@@ -223,6 +251,16 @@ if ($TestDiscovery -and $RunSeconds -lt 15)
 if ($TestMaster -and $RunSeconds -lt 20)
 {
     Fail "-TestMaster's discovery window runs for ~10s, plus master-server/host startup; use -RunSeconds >= 20 (got $RunSeconds)"
+}
+
+if ($TestMigration -and $RunSeconds -lt 120)
+{
+    Fail "-TestMigration needs time for the host to die (~25s), both clients to detect+exhaust retries+elect+reclaim, plus a stability margin afterwards; use -RunSeconds >= 120 (got $RunSeconds)"
+}
+
+if ($TestMigration -and $JoinPolicy -eq 'spectator')
+{
+    Fail '-TestMigration requires -JoinPolicy own or coop -- a spectator client never gets an "Assigned company" line to compare before/after'
 }
 
 if ($Expect -eq '')
@@ -317,6 +355,14 @@ try
         # the shared config file (CommandLine.h's --master_server).
         $hostArgs += @('--port', $hostGamePort, '--master_server', "127.0.0.1:$masterUdpPort")
     }
+    if ($TestMigration)
+    {
+        # Hard-crash (not a graceful close -- see the -TestMigration switch
+        # doc above) ~25s in, plus shortened retry/timeout/migration-plan
+        # constants so the whole election+promotion+reclaim sequence
+        # resolves in well under the RunSeconds window.
+        $hostArgs += @('--test_kill_after', '25', '--test_fast_retry')
+    }
     $hostArgs += @('host', $fixture)
     $hostProc = Start-Process $exe -ArgumentList $hostArgs -PassThru -NoNewWindow
     Start-Sleep 8
@@ -347,30 +393,68 @@ try
         {
             $clientArgs += @('--test_blackhole', '20,20')
         }
+        if ($TestMigration)
+        {
+            # Every process in this script shares the same %APPDATA% config
+            # file, so preferredOwnerName is otherwise identical (empty)
+            # across clientA and clientB -- which would break migration
+            # reclaim's name-based matching (an empty name's "Player #<id>"
+            # display fallback is id-dependent, not a stable identity). See
+            # CommandLine.h's --test_owner_name doc.
+            $clientArgs += @('--test_fast_retry', '--test_owner_name', 'ClientA')
+        }
     }
     $clientProc = Start-Process $exe -ArgumentList $clientArgs -PassThru -NoNewWindow
+
+    $clientBProc = $null
+    if ($TestMigration)
+    {
+        Start-Sleep 5
+        Write-Host 'Starting second client (clientB)...'
+        $clientBArgs = @('--locomotion_path', $LocomotionPath, '--headless', '--log_levels', 'all', '--test_fast_retry', '--test_owner_name', 'ClientB', 'join', '127.0.0.1')
+        $clientBProc = Start-Process $exe -ArgumentList $clientBArgs -PassThru -NoNewWindow
+    }
 
     Write-Host "Running for $RunSeconds seconds..."
     Start-Sleep $RunSeconds
 
     $hostAlive = -not $hostProc.HasExited
     $clientAlive = -not $clientProc.HasExited
+    $clientBAlive = $true
+    if ($TestMigration) { $clientBAlive = -not $clientBProc.HasExited }
     $masterAlive = $true
     if ($TestMaster) { $masterAlive = -not $masterServerProc.HasExited }
-    Stop-Process -Id $hostProc.Id, $clientProc.Id -Force -ErrorAction SilentlyContinue
+    $stopIds = @($hostProc.Id, $clientProc.Id)
+    if ($TestMigration) { $stopIds += $clientBProc.Id }
+    Stop-Process -Id $stopIds -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
 
-    if (-not $hostAlive) { Fail 'host process died during the run' }
-    if (-not $clientAlive) { Fail 'client process died during the run' }
+    if ($TestMigration)
+    {
+        # The host is SUPPOSED to die (--test_kill_after hard-exits it,
+        # simulating a crash) -- only clientA (the elected/promoted
+        # successor) and clientB (which reclaims into it) must still be
+        # alive at the end.
+        if (-not $clientAlive) { Fail 'clientA process died during the run' }
+        if (-not $clientBAlive) { Fail 'clientB process died during the run' }
+    }
+    else
+    {
+        if (-not $hostAlive) { Fail 'host process died during the run' }
+        if (-not $clientAlive) { Fail 'client process died during the run' }
+    }
     if ($TestMaster -and -not $masterAlive) { Fail 'master server process died during the run' }
 
-    # Sort by name: the filename embeds the creation timestamp, so the host
-    # (started first) always sorts first. LastWriteTime is unreliable here -
-    # it reflects whichever process happened to flush a log line last.
+    # Sort by name: the filename embeds the creation timestamp, so processes
+    # sort in start order (host, then clientA, then clientB if present).
+    # LastWriteTime is unreliable here - it reflects whichever process
+    # happened to flush a log line last.
     $logs = Get-ChildItem $logDir -File | Sort-Object Name
-    if ($logs.Count -lt 2) { Fail "expected 2 log files, found $($logs.Count)" }
+    $expectedLogCount = if ($TestMigration) { 3 } else { 2 }
+    if ($logs.Count -lt $expectedLogCount) { Fail "expected $expectedLogCount log files, found $($logs.Count)" }
     $hostLog = Get-Content $logs[0].FullName
     $clientLog = Get-Content $logs[1].FullName
+    $clientBLog = if ($TestMigration) { Get-Content $logs[2].FullName } else { @() }
 
     $accepts = ($hostLog | Select-String 'Accepted new client').Count
     if ($TestDiscovery -or $TestMaster)
@@ -381,6 +465,13 @@ try
         # join flow entirely, not just skip logging.
         if ($accepts -ne 0) { Fail "host accepted $accepts clients (expected 0 -- -TestDiscovery/-TestMaster must never join)" }
     }
+    elseif ($TestMigration)
+    {
+        # The ORIGINAL host must accept both clientA and clientB before it
+        # dies -- the later migration reclaim is handled by clientA's
+        # promoted server, a different process, and is asserted separately.
+        if ($accepts -ne 2) { Fail "host accepted $accepts clients (expected 2 -- clientA and clientB before the host died)" }
+    }
     else
     {
         if ($accepts -ne 1) { Fail "host accepted $accepts clients (expected 1)" }
@@ -389,8 +480,9 @@ try
     # Gameplay-transition and join-assignment assertions are meaningless for
     # -TestDiscovery/-TestMaster: that process never joins, so it never
     # receives a snapshot or a company assignment, and never transitions to
-    # gameplay.
-    if (-not $TestDiscovery -and -not $TestMaster)
+    # gameplay. -TestMigration has its own dedicated assertion block below
+    # (it needs to check clientB too, not just $clientLog).
+    if (-not $TestDiscovery -and -not $TestMaster -and -not $TestMigration)
     {
         if (($clientLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1)
         {
@@ -519,6 +611,56 @@ try
         # reconnect above was a reclaim, not a second fresh join.
     }
 
+    if ($TestMigration)
+    {
+        # Both clients must have reached gameplay and received their initial
+        # company assignment before the host died.
+        if (($clientLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1) { Fail 'clientA never reached gameplay' }
+        if (($clientBLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1) { Fail 'clientB never reached gameplay' }
+
+        $clientAInitial = @($clientLog | Select-String 'Assigned company (\d+)') | Select-Object -First 1
+        $clientBInitial = @($clientBLog | Select-String 'Assigned company (\d+)') | Select-Object -First 1
+        if (-not $clientAInitial) { Fail 'clientA never received its initial company assignment' }
+        if (-not $clientBInitial) { Fail 'clientB never received its initial company assignment' }
+
+        # Exactly one promotion, and it must be clientA (the lower client
+        # id, since it joined first, and therefore plan[0] - the
+        # deterministic successor per docs/multiplayer.md § Host migration).
+        $promotions = @(($clientLog + $clientBLog) | Select-String 'Promoted to session host' -SimpleMatch)
+        if ($promotions.Count -ne 1)
+        {
+            Fail "expected exactly 1 'Promoted to session host' line across both clients, found $($promotions.Count)"
+        }
+        if (($clientLog | Select-String 'Promoted to session host' -SimpleMatch).Count -ne 1)
+        {
+            Fail "clientA (expected successor) never logged 'Promoted to session host'"
+        }
+        if (($clientBLog | Select-String 'Promoted to session host' -SimpleMatch).Count -ne 0)
+        {
+            Fail 'clientB logged being promoted to session host -- it should have reclaimed into clientA instead'
+        }
+
+        # clientB must have reclaimed its seat by name into clientA's new
+        # server and been re-assigned the SAME company it had before the
+        # crash.
+        if (($clientBLog | Select-String 'Host migration: reclaim successful' -SimpleMatch).Count -lt 1)
+        {
+            Fail 'clientB never logged a successful migration reclaim'
+        }
+
+        $clientBAllAssigned = @($clientBLog | Select-String 'Assigned company (\d+)')
+        if ($clientBAllAssigned.Count -lt 2)
+        {
+            Fail "expected 2+ 'Assigned company' lines in clientB log (initial join + post-migration reclaim), found $($clientBAllAssigned.Count)"
+        }
+        $clientBInitialCompany = $clientBInitial.Matches[0].Groups[1].Value
+        $clientBFinalCompany = $clientBAllAssigned[-1].Matches[0].Groups[1].Value
+        if ($clientBFinalCompany -ne $clientBInitialCompany)
+        {
+            Fail "clientB's post-migration company ($clientBFinalCompany) differs from its pre-crash company ($clientBInitialCompany)"
+        }
+    }
+
     if ($TestDiscovery)
     {
         # The host's own display name falls back to "Player #0" under the
@@ -526,12 +668,12 @@ try
         # Network::resolveDisplayName), and it always binds to the default
         # port (11754) here since neither the host nor client override
         # --bind/--port in this script. maxPlayers is always kMaxRosterEntries
-        # (32); version must match this build's kNetworkVersion (8 as of
+        # (32); version must match this build's kNetworkVersion (9 as of
         # this writing -- bump alongside kNetworkVersion if it changes).
-        $discoveredMatch = $clientLog | Select-String "\[TEST\] discovered server: 'Player #0' 127\.0\.0\.1:11754 players=\d+/32 version=8" | Select-Object -First 1
+        $discoveredMatch = $clientLog | Select-String "\[TEST\] discovered server: 'Player #0' 127\.0\.0\.1:11754 players=\d+/32 version=9" | Select-Object -First 1
         if (-not $discoveredMatch)
         {
-            Fail "client never logged discovering the host (expected a '[TEST] discovered server: ''Player #0'' 127.0.0.1:11754 players=N/32 version=8' line)"
+            Fail "client never logged discovering the host (expected a '[TEST] discovered server: ''Player #0'' 127.0.0.1:11754 players=N/32 version=9' line)"
         }
     }
 
@@ -548,14 +690,14 @@ try
         # via the MASTER server, not LAN discovery (which cannot find it --
         # the host listens on $hostGamePort, a non-default port). name/port/
         # version must match; version bumps alongside kNetworkVersion.
-        $discoveredMasterMatch = $clientLog | Select-String "\[TEST\] discovered server \(master\): 'Player #0' 127\.0\.0\.1:$hostGamePort players=\d+/32 version=8" | Select-Object -First 1
+        $discoveredMasterMatch = $clientLog | Select-String "\[TEST\] discovered server \(master\): 'Player #0' 127\.0\.0\.1:$hostGamePort players=\d+/32 version=9" | Select-Object -First 1
         if (-not $discoveredMasterMatch)
         {
-            Fail "client never logged discovering the host via the master server (expected a '[TEST] discovered server (master): ...' line naming 127.0.0.1:$hostGamePort version=8)"
+            Fail "client never logged discovering the host via the master server (expected a '[TEST] discovered server (master): ...' line naming 127.0.0.1:$hostGamePort version=9)"
         }
     }
 
-    $badLines = @($hostLog + $clientLog | Select-String '\[ERR\]|[Dd]esync')
+    $badLines = @($hostLog + $clientLog + $clientBLog | Select-String '\[ERR\]|[Dd]esync')
     if ($badLines.Count -gt 0)
     {
         $badLines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
@@ -569,6 +711,7 @@ try
     elseif ($TestReconnect) { $extraNote = ', auto-reconnect + seat reclaim verified' }
     elseif ($TestDiscovery) { $extraNote = ', LAN discovery verified (host found via loopback, never joined)' }
     elseif ($TestMaster) { $extraNote = ', master server integration verified (announce -> query -> merge, via loopback)' }
+    elseif ($TestMigration) { $extraNote = ', host migration verified (election -> promotion -> reclaim, no desync)' }
     Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect$extraNote)" -ForegroundColor Green
     exit 0
 }

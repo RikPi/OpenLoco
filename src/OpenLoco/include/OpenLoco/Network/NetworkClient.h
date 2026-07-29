@@ -53,6 +53,21 @@ namespace OpenLoco::Network
         bool _eligibleForAutoRetry{}; // an established (connected/resyncing) connection just timed out
         bool _suppressAutoRetry{};
 
+        // Host migration (docs/multiplayer.md § Host migration). _myId is
+        // this client's own client_id_t, learned from
+        // ConnectResponsePacket::assignedId (previously never told to
+        // clients at all - see Packet.h). _migrationPlan is the latest
+        // migrationPlan snapshot; the facade (Network.cpp) only ever reads
+        // it once, at the moment this object is about to be destroyed
+        // because its connection was lost (see getMigrationPlan()).
+        // _migrationReclaim marks that this instance's ConnectPacket should
+        // set the migrationReclaim flag (set via setMigrationReclaim(),
+        // must be called before connect() to take effect, same pattern as
+        // setReconnectToken()).
+        client_id_t _myId{};
+        std::vector<MigrationCandidate> _migrationPlan;
+        bool _migrationReclaim{};
+
         // Latest roster snapshot received from the server (RosterUpdatePacket).
         // Presentation data only - never fed back into GameState/game commands.
         std::vector<PlayerRosterEntry> _roster;
@@ -134,6 +149,7 @@ namespace OpenLoco::Network
         void receiveRosterUpdatePacket(const RosterUpdatePacket& packet);
         void receiveServerClosingPacket(const ServerClosingPacket& packet);
         void receiveResyncRequiredPacket(const ResyncRequiredPacket& packet);
+        void receiveMigrationPlanPacket(const MigrationPlanPacket& packet);
 
         void checkForDesync();
         void onDesyncDetected(const PingPacket& serverState, const TickRngState& localState);
@@ -166,6 +182,34 @@ namespace OpenLoco::Network
         // unless _suppressAutoRetry overrides both (graceful shutdown,
         // user cancel, explicit rejection).
         bool shouldAutoRetry() const;
+
+        // Whether this instance's connection was permanently rejected/closed
+        // in a way that must never be retried (graceful serverClosing, user
+        // cancel, or an explicit connection rejection e.g. version
+        // mismatch) - consulted by the facade's separate host-migration
+        // reclaim retry loop, which does not otherwise go through
+        // shouldAutoRetry()/_isReconnectAttempt.
+        bool wasRejectedPermanently() const;
+
+        // Host migration (docs/multiplayer.md § Host migration). Must be
+        // called before connect() to take effect (only affects the
+        // ConnectPacket connect() sends), mirroring setReconnectToken().
+        void setMigrationReclaim();
+
+        // This client's own id (ConnectResponsePacket::assignedId), valid
+        // once connectedSuccessfully/later. 0 before then.
+        client_id_t getMyId() const;
+
+        // The latest migrationPlan snapshot received from the server.
+        const std::vector<MigrationCandidate>& getMigrationPlan() const;
+
+        // The last game command index this client has actually applied
+        // (_localGameCommandIndex) - what a promoted successor host must
+        // seed its own index counter from, so newly issued commands
+        // continue the exact same sequence every surviving peer already
+        // agrees on (docs/multiplayer.md § Host migration determinism
+        // guard).
+        uint32_t getLocalGameCommandIndex() const;
 
         void connect(std::string_view host, port_t port);
         void sendChatMessage(std::string_view message) override;

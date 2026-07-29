@@ -125,10 +125,15 @@ reclaim its company, instead of being treated as a brand-new player.
 Host migration is out of scope for this design; a dead host still ends the
 session. (Superseded — see § Host migration below.)
 
-## Host migration (design)
+## Host migration (implemented, network version 9)
 
 Goal: when the host dies or vanishes, the remaining clients continue the
 session under a new host instead of falling back to the title screen.
+
+Implemented as designed below; see KNOWLEDGEBASE.md § Host migration for
+implementation notes (wire layout, election/promotion code paths, the port
+subtlety, the headless test hooks) and TASKS.md's Milestone 4 entry for the
+verification record (exact log lines, ctest/smoke results).
 
 What makes this tractable in a lockstep architecture: every client already
 holds the complete authoritative game state, the human-company mask, and

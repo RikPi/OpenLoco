@@ -1275,6 +1275,149 @@ regs<->struct conversion.
   query + merge with LAN discovery results, `network.masterServer` config
   value). This service is master-server-only.
 
+## Host migration (network version 9)
+
+Implements `docs/multiplayer.md` § Host migration. See TASKS.md's Milestone 4
+entry for the full narrative; this section is the durable "how it actually
+works and what tripped us up" reference.
+
+- **Wire additions** (`Packet.h`): `PacketKind::migrationPlan` (appended
+  last, after `masterServerList`, so the master-server Go service's
+  hard-coded 18/19/20 values are never disturbed). `MigrationCandidate{
+  client_id_t id; uint32_t ipv4; uint16_t port }` (ipv4 network-byte-order,
+  same convention as `MasterServerListEntry::ipv4`), `kMaxMigrationCandidates
+  = kMaxRosterEntries`, `MigrationPlanPacket` (variable-length, "reserve the
+  max, send only `count`" pattern like `RosterUpdatePacket`).
+  `ConnectPacket` gained `hostingPort` (u16) and `migrationReclaim` (u8).
+  `ConnectResponsePacket` gained `assignedId` (`client_id_t`) — **this is how
+  clients learn their own id**; they never did before this change (checked
+  first: no existing mechanism told a client its own `client_id_t` anywhere
+  in the wire protocol). Chose `ConnectResponsePacket` over
+  `CompanyAssignmentPacket` because it's sent unconditionally and earliest
+  (even a rejected/version-mismatched connect gets one; the id field is only
+  meaningful on the success path), whereas `CompanyAssignmentPacket` is
+  per-join-outcome and arrives later.
+- **The port subtlety** (the one the design doc explicitly calls out):
+  `NetworkConnection::getEndpoint()` on the server side gives the client's
+  *observed* UDP source port, which is an **ephemeral** port the OS assigned
+  to that client's outbound socket — nothing is listening there, so it is
+  useless as "where to reconnect to". `MigrationCandidate::port` is instead
+  each client's own advertised **listen** port (`ConnectPacket::hostingPort`,
+  resolved the same CLI/config way `openServer()`/`promoteToHost()` resolve
+  their own bind port: CLI `--port` wins, else `config.network.port`, else
+  `kDefaultPort`), sent by every client on every connect (not just when
+  hosting — any client might later be elected successor and needs to have
+  already told everyone a real port).
+- **Election** (`Network.cpp` facade, alongside the existing
+  `ReconnectState`): a client only ever consults its migration plan once
+  `kMaxReconnectAttempts` (5) ordinary auto-retry attempts against the dead
+  host are exhausted — captured *once*, at the moment the connection is
+  first lost (`!_reconnect.active` branch in `tick()`), never re-captured on
+  later failed retries (which are against the same, presumably still-dead,
+  endpoint and never receive a fresher plan anyway). Successor = simply
+  `plan.front()` — plans only ever list clients (`NetworkServer::
+  buildMigrationPlan` iterates `_clients`, never a host entry), sorted by id
+  ascending, so this is deterministic and every remaining peer computes it
+  identically without coordination.
+- **Becoming host** (`Network.cpp::promoteToHost()`): reuses
+  `NetworkServer::listen()` verbatim (same scene-flag/master-announce logic
+  as an ordinary `openServer()` — no duplicated code path to keep in sync),
+  then two new seeding calls: `seedMigrationReservedSeats()` (every OTHER
+  roster entry becomes a reserved seat, token 0) and
+  `seedGameCommandIndex()` (determinism guard — see below). Deliberately
+  does **not** call `CompanyManager::markCompanyAsHuman`/
+  `clearHumanCompanies` the way `openServer()`/`requestAllClientsResync()`
+  do — this is the exact same world every peer already shares, not a freshly
+  loaded one, so the human-company mask (already correct, already mirrored
+  identically on every peer) must not be touched at all.
+- **Determinism guard**: a promoted host's `_gameCommandIndex` must continue
+  from exactly where every surviving peer already left off, not restart at
+  0 — otherwise the next command it assigns would collide with an index
+  every other peer already believes is taken. Wired via
+  `NetworkClient::getLocalGameCommandIndex()` (already-existing
+  `_localGameCommandIndex`, just needed a public getter) →
+  `NetworkServer::seedGameCommandIndex()`. GameState/GameScene/
+  CommandSerialization themselves are untouched, per the task constraint —
+  this is pure session-bookkeeping plumbing between two already-existing
+  counters.
+- **The dead host's own seat**: its roster entry is always `client_id_t 0`
+  (the synthetic "whoever is currently hosting" convention — see
+  `NetworkServer::buildRoster()`), which is *not* a portable identity. If
+  seeded verbatim under id 0, it would collide with the promoted server's
+  own synthetic host-id-0 roster entry. `seedMigrationReservedSeats()`
+  remaps it to a fresh id (`max(existing roster ids) + 1`, and bumps
+  `_nextClientId` past that too) instead. Cosmetic side effect, observed
+  but not asserted on: a promoted client with an empty/unset
+  `preferredOwnerName` and the dead original host (same) both display as
+  "Player #0" in a post-migration roster listing (each is a distinct entry
+  with its own id/company underneath — this is a display-only collision,
+  not a functional one).
+- **Migration-reclaim matching** (`NetworkServer::createNewClient()`, new
+  branch checked *before* the existing token-reclaim branch): while
+  `Platform::getTime() < _migrationWindowDeadline` (0 = never promoted,
+  i.e. an ordinary server never opens this branch at all), a
+  `migrationReclaim` connect matches by **trimmed name** (not token — a
+  migration-reclaim `ConnectPacket::token` is always 0, a fresh session with
+  a different process) against `_reservedSeats`. No match falls through to
+  the ordinary paths (same "never permanently strand a connect" philosophy
+  as the pre-existing unrecognised-token fallback). After the window closes,
+  `migrationReclaim` has no special effect — the seeded seats are just
+  ordinary reserved seats from then on (matches the design doc's "after the
+  window, unclaimed seats stay reserved exactly like ordinary disconnects").
+- **Headless test hooks** (`CommandLine.h`/`.cpp`, all hidden):
+  - `--test_kill_after <seconds>` (host): hard-exits via `std::_Exit(0)` —
+    no destructors, no `ServerClosingPacket`. Deliberately distinct from
+    `--test_shutdown_after`: that one's graceful close sets
+    `_suppressAutoRetry` on every client, which would prevent migration from
+    ever triggering at all — exactly the behaviour the design doc wants for
+    an *intentional* shutdown, but the opposite of what a crash-simulation
+    hook needs.
+  - `--test_fast_retry` (either side): shortens, purely for test
+    practicality, `NetworkConnection`'s connection timeout (15000→4000ms),
+    `NetworkClient::connect()`'s initial "connecting" timeout (5000→1500ms),
+    the facade's reconnect/migration-reclaim retry spacing (5000→1000ms),
+    the server's migration-plan broadcast cadence (10000→2000ms) and
+    migration window (60000→20000ms). Zero effect on wire format or default
+    behaviour — every constant is read through a helper gated on the flag,
+    confirmed by the unmodified `-TestReconnect`/`-TestRename` regression
+    runs (which never pass it) still passing with identical timing
+    characteristics to before this change.
+  - `--test_owner_name <name>` (client): overrides
+    `Config::preferredOwnerName` for the `ConnectPacket` only (never
+    persisted). **Found necessary by the first real `-TestMigration` run,
+    not anticipated in advance**: every process in a headless smoke-test run
+    shares one `%APPDATA%\OpenLoco\openloco.yml`, so with an unset
+    `preferredOwnerName` every anonymous client's display name resolves via
+    the *same* fallback rule (`Network::resolveDisplayName`) to
+    `"Player #<id>"` — and since the id itself is only assigned by whichever
+    host a client happens to join, two different anonymous clients can
+    legitimately end up computing the *same* fallback string from two
+    different original ids once the "which id did I have" information is
+    exactly what reclaim-by-name is trying to recover. Plain token-based
+    reconnect never hit this (it doesn't match by name at all); it only
+    surfaced once two *different* clients both needed distinguishable
+    identities in the same run for the first time. Fixed by giving the two
+    smoke-test client processes distinct names, not by changing any
+    production matching logic — real deployments where players configure a
+    real `preferredOwnerName` are unaffected by this failure mode from the
+    start.
+- `scripts\run_sync_smoke_test.ps1` gained `-TestMigration` (see TASKS.md for
+  the full assertion list and the exact verified log lines). Also fixed two
+  pre-existing hard-coded `version=8` literals in the `-TestDiscovery`/
+  `-TestMaster` assertions to `version=9` (must be bumped alongside
+  `kNetworkVersion` — these are regex string literals, nothing enforces
+  they track the constant automatically).
+- Verified: full clean build (App + OpenLocoTests), `ctest -C Release`
+  152/152 (no new unit tests added — coverage is via the new headless smoke
+  mode only, since this feature is inherently about real-time multi-process
+  timing/session-recovery behaviour, not a pure-function wire codec);
+  `-TestRename` (own policy) and `-TestReconnect` regressions both PASS
+  unchanged with the final binary (confirms `-TestReconnect`'s "no migration
+  during plain reconnect" invariant holds — it never exhausts the retry
+  budget against a still-alive host, so `beginMigrationOrGiveUp()` is never
+  reached); `-TestMigration` PASSes (120s run) with the host, clientA and
+  clientB logs matching TASKS.md's recorded evidence lines exactly.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the

@@ -1,4 +1,5 @@
 #include "Network/NetworkConnection.h"
+#include "CommandLine.h"
 #include "Logging.h"
 #include <OpenLoco/Platform/Platform.h>
 #include <cstring>
@@ -7,6 +8,20 @@ using namespace OpenLoco::Network;
 
 constexpr uint32_t kRedeliverTimeout = 1000;
 constexpr uint32_t kConnectionTimeout = 15000;
+// --test_fast_retry (CommandLine.h, hidden test hook): shortens the
+// connection timeout so the host migration smoke test's "both peers
+// independently time out" detection resolves quickly. See
+// KNOWLEDGEBASE.md § Host migration test hook. Has no effect unless the
+// flag is passed - default behaviour/timing is unchanged.
+constexpr uint32_t kFastConnectionTimeout = 4000;
+
+namespace
+{
+    uint32_t connectionTimeoutMs()
+    {
+        return OpenLoco::getCommandLineOptions().testFastRetry ? kFastConnectionTimeout : kConnectionTimeout;
+    }
+}
 
 NetworkConnection::NetworkConnection(IUdpSocket* socket, std::unique_ptr<INetworkEndpoint> endpoint)
     : _socket(socket)
@@ -27,7 +42,7 @@ uint32_t NetworkConnection::getTime()
 bool NetworkConnection::hasTimedOut() const
 {
     auto durationSinceLastPacket = getTime() - _timeOfLastReceivedPacket;
-    if (durationSinceLastPacket > kConnectionTimeout)
+    if (durationSinceLastPacket > connectionTimeoutMs())
     {
         return true;
     }

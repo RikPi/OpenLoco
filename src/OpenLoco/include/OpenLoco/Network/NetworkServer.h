@@ -35,6 +35,12 @@ namespace OpenLoco::Network
         // client alongside every CompanyAssignmentPacket; a later
         // ConnectPacket presenting the same token reclaims this seat.
         uint64_t token{};
+
+        // This client's own configured server/listen port
+        // (ConnectPacket::hostingPort), advertised in this server's
+        // migrationPlan candidates if it is ever broadcast - see
+        // docs/multiplayer.md § Host migration.
+        uint16_t hostingPort{};
     };
 
     // A timed-out client's identity/company, kept so it can reclaim its seat
@@ -130,6 +136,33 @@ namespace OpenLoco::Network
         bool _testShutdownTriggered{};
         void updateTestShutdownHook();
 
+        // Headless test hook (--test_kill_after <seconds>, CommandLine.h):
+        // once the server has been up for <seconds>, hard-exits the process
+        // immediately (std::_Exit - no destructors, no ServerClosingPacket)
+        // to simulate a genuine host crash, driving the host migration
+        // smoke test. Deliberately distinct from
+        // updateTestShutdownHook()/--test_shutdown_after, which is a
+        // graceful close that must NOT trigger client migration. See
+        // KNOWLEDGEBASE.md § Host migration test hook.
+        bool _testKillTriggered{};
+        void updateTestKillAfterHook();
+
+        // Host migration (docs/multiplayer.md § Host migration). Broadcast
+        // roughly every 10s (updateMigrationPlanBroadcast(), driven from
+        // onUpdate()) and immediately on roster change
+        // (broadcastRosterUpdate()).
+        uint32_t _lastMigrationPlanBroadcast{};
+        void updateMigrationPlanBroadcast();
+        void broadcastMigrationPlan();
+        void buildMigrationPlan(MigrationPlanPacket& packet) const;
+
+        // 0 = this server has never been promoted-to (an ordinary host) -
+        // migration-reclaim connects are only honoured while
+        // Platform::getTime() < _migrationWindowDeadline (and it is
+        // nonzero). Set once, by seedMigrationReservedSeats(), and never
+        // reset.
+        uint32_t _migrationWindowDeadline{};
+
         Client* findClient(const INetworkEndpoint& endpoint);
         Client* findClient(client_id_t id);
         void createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet);
@@ -178,6 +211,26 @@ namespace OpenLoco::Network
         // Host loaded a different save mid-session: reset every client's
         // join assignment and tell them to resync against the new world
         void requestAllClientsResync();
+
+        // Host migration (docs/multiplayer.md § Host migration): called
+        // once, immediately after listen(), by Network::promoteToHost()
+        // when a client is elected successor host. Seeds a reserved seat
+        // (token 0 - migration reclaim matches by name, not token) for
+        // every OTHER entry in the caller's last known roster snapshot
+        // (including the dead original host's own former id-0 entry, which
+        // is remapped to a fresh id since 0 always means "whoever is
+        // currently hosting" in the roster convention - see buildRoster()),
+        // and opens a ~60s migration window during which a
+        // ConnectPacket::migrationReclaim connect may reclaim a seat by
+        // (trimmed) name.
+        void seedMigrationReservedSeats(const std::vector<PlayerRosterEntry>& lastRoster, client_id_t selfId);
+
+        // Host migration determinism guard (docs/multiplayer.md § Host
+        // migration): a promoted successor host's command-index counter
+        // must continue exactly where every surviving peer already left
+        // off, not restart from 0 - see
+        // NetworkClient::getLocalGameCommandIndex().
+        void seedGameCommandIndex(uint32_t index);
 
         // Builds the authoritative roster from the live client list plus the
         // host itself (client_id_t 0). Used both to broadcast
