@@ -57,6 +57,10 @@ namespace OpenLoco
         std::cout << "                            a byte-identical save." << std::endl;
         std::cout << "--headless                  Run without creating a window or initialising audio." << std::endl;
         std::cout << "                            Intended for host/join servers running without a display." << std::endl;
+        std::cout << "--join_policy <policy>      For host: what joining players get." << std::endl;
+        std::cout << "                            - own: a freshly created company (default)" << std::endl;
+        std::cout << "                            - coop: share the host's company" << std::endl;
+        std::cout << "                            - spectator: watch only" << std::endl;
     }
 
     static int uncompressFile(const CommandLineOptions& options)

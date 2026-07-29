@@ -208,6 +208,12 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   fixes this (see § Competitor object fixture) — joins are assigned a real
   company. Towns/industries are still absent (separate object types, not
   addressed by this fixture), so AI-active sync still can't be exercised.
+- Join policy (Phase C): host-side `--join_policy <own|coop|spectator>`
+  (CommandLine `JoinPolicy`, applied in
+  `NetworkServer::onReceiveStateRequestPacket`). `coop` reuses the host's
+  company via the assignment packet — no game command involved, since no
+  state changes; `spectator` (and failed company creation) sends an
+  explicit null `CompanyAssignmentPacket` so the client knows its role.
 - Chat is packet-level (`sendChatMessage` relay), never a game command;
   UI in `Ui/Windows/Chat.cpp` (WindowType::chat = 38).
 - Windows are declared via facades in `Ui/WindowManager.h`, registered in

@@ -308,7 +308,8 @@ namespace OpenLoco
                           .registerOption("--all", "-a")
                           .registerOption("--locomotion_path", 1)
                           .registerOption("--seed", 1)
-                          .registerOption("--headless");
+                          .registerOption("--headless")
+                          .registerOption("--join_policy", 1);
 
         if (!parser.parse())
         {
@@ -408,6 +409,28 @@ namespace OpenLoco
         }
 
         options.headless = parser.hasOption("--headless");
+
+        if (parser.hasOption("--join_policy"))
+        {
+            auto policy = parser.getArg("--join_policy");
+            if (policy == "own")
+            {
+                options.joinPolicy = JoinPolicy::ownCompany;
+            }
+            else if (policy == "coop")
+            {
+                options.joinPolicy = JoinPolicy::coop;
+            }
+            else if (policy == "spectator")
+            {
+                options.joinPolicy = JoinPolicy::spectator;
+            }
+            else
+            {
+                Logging::error("Unknown --join_policy '{}' (expected own, coop or spectator)", policy);
+                return {};
+            }
+        }
 
         return options;
     }

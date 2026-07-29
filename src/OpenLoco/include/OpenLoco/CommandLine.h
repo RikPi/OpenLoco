@@ -21,6 +21,14 @@ namespace OpenLoco
         intro,
     };
 
+    // What a hosting server does with joining players (session model Phase C)
+    enum class JoinPolicy : uint8_t
+    {
+        ownCompany, // each joining player gets a freshly created company (competitive)
+        coop,       // joining players share the host's company
+        spectator,  // joining players can only watch (and chat)
+    };
+
     struct CommandLineOptions
     {
         CommandLineAction action = CommandLineAction::none;
@@ -36,6 +44,7 @@ namespace OpenLoco
         std::optional<std::string> locomotionDataPath{};
         std::optional<uint32_t> seed{};
         bool headless{};
+        JoinPolicy joinPolicy = JoinPolicy::ownCompany;
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

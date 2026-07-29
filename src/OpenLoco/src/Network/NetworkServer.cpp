@@ -1,4 +1,5 @@
 #include "Network/NetworkServer.h"
+#include "CommandLine.h"
 #include "GameCommands/GameCommands.h"
 #include "GameState.h"
 #include "Logging.h"
@@ -214,16 +215,53 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
         index++;
     }
 
-    // The client now has the full snapshot in flight; queue its join
-    // assignment. Tagged with the client's id (not put on the wire - see
-    // ServerQueuedGameCommand) so runGameCommands() can route the result
-    // back to this client once the command has executed. CompanyId::null is
-    // used as the acting company: createPlayerCompany doesn't check company
-    // compatibility, it just allocates a fresh slot.
-    GameCommands::registers regs;
-    regs.esi = static_cast<int32_t>(GameCommands::GameCommand::createPlayerCompany);
-    regs.bl = GameCommands::Flags::apply;
-    queueGameCommand(CompanyId::null, regs, GameCommands::Flags::apply, client.id);
+    // The client now has the full snapshot in flight; resolve its join
+    // assignment according to the host's policy.
+    switch (getCommandLineOptions().joinPolicy)
+    {
+        case JoinPolicy::coop:
+        {
+            // Share the host's company; no new company, no game command
+            auto hostCompany = CompanyManager::getControllingId();
+            if (hostCompany != CompanyId::null)
+            {
+                client.company = hostCompany;
+                Logging::info("Assigned host company {} to client '{}' (coop)", static_cast<uint32_t>(hostCompany), client.name);
+            }
+            else
+            {
+                Logging::info("Host has no company; client '{}' joins as spectator", client.name);
+            }
+
+            CompanyAssignmentPacket packet;
+            packet.company = client.company;
+            client.connection->sendPacket(packet);
+            break;
+        }
+        case JoinPolicy::spectator:
+        {
+            Logging::info("Client '{}' joins as spectator (host join policy)", client.name);
+            CompanyAssignmentPacket packet;
+            packet.company = CompanyId::null;
+            client.connection->sendPacket(packet);
+            break;
+        }
+        case JoinPolicy::ownCompany:
+        default:
+        {
+            // Queue a replicated company creation, tagged with the client's
+            // id (not put on the wire - see ServerQueuedGameCommand) so
+            // runGameCommands() can route the result back to this client
+            // once the command has executed. CompanyId::null is used as the
+            // acting company: createPlayerCompany doesn't check company
+            // compatibility, it just allocates a fresh slot.
+            GameCommands::registers regs;
+            regs.esi = static_cast<int32_t>(GameCommands::GameCommand::createPlayerCompany);
+            regs.bl = GameCommands::Flags::apply;
+            queueGameCommand(CompanyId::null, regs, GameCommands::Flags::apply, client.id);
+            break;
+        }
+    }
 }
 
 void NetworkServer::onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet)
@@ -452,6 +490,11 @@ void NetworkServer::runGameCommands()
                 else
                 {
                     Logging::info("Could not create a company for client '{}' (no free company slot or no competitor available); leaving as spectator", client->name);
+
+                    // Tell the client explicitly so it knows it is spectating
+                    CompanyAssignmentPacket packet;
+                    packet.company = CompanyId::null;
+                    client->connection->sendPacket(packet);
                 }
             }
         }

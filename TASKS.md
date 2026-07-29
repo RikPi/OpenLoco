@@ -36,12 +36,21 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
         `CompanyAssignment` packet, client controlling-id setup. Network
         version bumped to 3. Verified headless: command fails gracefully on
         the zero-competitor-object fixture (expected), no desync.
-  - [ ] Phase C: co-op (join existing company) + explicit spectator role
+  - [x] Phase C: host `--join_policy <own|coop|spectator>`. coop assigns
+        the host's company (no new command needed), spectator sends an
+        explicit null assignment (also now sent when company creation
+        fails). Verified headless: spectator policy end-to-end (host log
+        "joins as spectator (host join policy)", client log "remaining a
+        spectator", no desync). coop success path needs a fixture where
+        the host owns a company (see backlog).
 
 ## Backlog
 
 - [ ] CI job: gensave → headless host+join → assert no desync (script the
       proven smoke test)
+- [ ] Fixture where the host owns a company (gensave option to create the
+      player company at generation time?) — exercises the coop join policy
+      success path and in-game command flow from a client
 - [x] Fixture with a minimal custom competitor `.DAT` object, unlocking the
       `createPlayerCompany` success path in the smoke test — hand-crafted
       (`scripts/gen_competitor_object.py`, regeneratable; see KNOWLEDGEBASE.md
