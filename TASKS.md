@@ -26,12 +26,16 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 ## In progress
 
 - [ ] **Session model** (design: `docs/multiplayer.md` § Session model)
-  - [ ] Phase A: server-side client→company mapping + enforcement
-        (override company on received commands; drop spectator commands)
-  - [ ] Phase B: join assignment — replicated `createPlayerCompany` game
+  - [x] Phase A: server-side client→company mapping + enforcement
+        (override company on received commands; drop spectator commands) —
+        already in place (`Client::company` in `NetworkServer.h`,
+        `onReceiveGameCommandPacket` drops spectators and overrides company)
+  - [x] Phase B: join assignment — replicated `createPlayerCompany` game
         command (repurpose id 69), human-company set (deterministic,
         mirrored via command execution + snapshot `ExtraState`),
-        `CompanyAssignment` packet, client controlling-id setup
+        `CompanyAssignment` packet, client controlling-id setup. Network
+        version bumped to 3. Verified headless: command fails gracefully on
+        the zero-competitor-object fixture (expected), no desync.
   - [ ] Phase C: co-op (join existing company) + explicit spectator role
 
 ## Backlog
@@ -39,7 +43,11 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 - [ ] CI job: gensave → headless host+join → assert no desync (script the
       proven smoke test)
 - [ ] Fixture with towns/industries/competitors to exercise AI-active sync
-      (currently OpenGraphics lacks those object types in our index)
+      (currently OpenGraphics lacks those object types in our index).
+      Likely path: author a minimal custom competitor `.DAT` object (also
+      unlocks the createPlayerCompany success path in the smoke test)
+- [ ] Trim/derive client display name (empty `preferredOwnerName` logs as
+      blank padding in "Accepted new client"/assignment messages)
 - [ ] Typed serialization for the 3 complex-type commands
       (`changeCompanyFace`, `updateOwnerStatus`, `vehicleRepaint`)
 - [ ] Player names in chat (needs client→name registry at Network layer)

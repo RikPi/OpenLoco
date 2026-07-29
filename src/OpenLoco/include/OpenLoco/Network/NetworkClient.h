@@ -82,6 +82,7 @@ namespace OpenLoco::Network
         void receiveChatMessagePacket(const ReceiveChatMessage& packet);
         void receivePingPacket(const PingPacket& packet);
         void receiveGameCommandPacket(const GameCommandPacket& packet);
+        void receiveCompanyAssignmentPacket(const CompanyAssignmentPacket& packet);
 
         void checkForDesync();
         void onDesyncDetected(const PingPacket& serverState, const TickRngState& localState);

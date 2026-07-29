@@ -49,6 +49,13 @@ namespace OpenLoco::CompanyManager
 {
     static std::array<Colour, Limits::kMaxCompanies + 1> _companyColours; // 0x009C645C
 
+    // Machine-local mirror of the deterministic human-company set (session
+    // model). Not part of GameState/S5: it is derived purely from replicated
+    // command execution (createPlayerCompany) plus the snapshot's ExtraState
+    // for late joiners, so it stays identical across peers without being
+    // synced state itself. See isPlayerCompany().
+    static uint16_t _humanCompanyMask;
+
     static void produceCompanies();
 
     static auto& rawCompanies()
@@ -71,6 +78,7 @@ namespace OpenLoco::CompanyManager
         }
 
         getGameState().produceAICompanyTimeout = 0;
+        clearHumanCompanies();
 
         // Reset player companies depending on network mode.
         if (SceneManager::isNetworkHost())
@@ -216,7 +224,51 @@ namespace OpenLoco::CompanyManager
             std::begin(rawPlayerCompanies()),
             std::end(rawPlayerCompanies()),
             id);
-        return findResult != std::end(rawPlayerCompanies());
+        if (findResult != std::end(rawPlayerCompanies()))
+        {
+            return true;
+        }
+
+        // The vanilla two-slot array only ever names the local machine's
+        // "mine"/"other" pair. With more than two humans in a session, the
+        // rest are tracked in the deterministic human-company set instead;
+        // consulting it only in networked games keeps single-player/AI-think
+        // gating exactly as before everywhere else.
+        return SceneManager::isNetworked() && isHumanCompany(id);
+    }
+
+    void markCompanyAsHuman(CompanyId id)
+    {
+        auto index = enumValue(id);
+        if (index < Limits::kMaxCompanies)
+        {
+            _humanCompanyMask |= static_cast<uint16_t>(1U << index);
+        }
+    }
+
+    void clearHumanCompanies()
+    {
+        _humanCompanyMask = 0;
+    }
+
+    bool isHumanCompany(CompanyId id)
+    {
+        auto index = enumValue(id);
+        if (index >= Limits::kMaxCompanies)
+        {
+            return false;
+        }
+        return (_humanCompanyMask & static_cast<uint16_t>(1U << index)) != 0;
+    }
+
+    uint16_t getHumanCompanyMask()
+    {
+        return _humanCompanyMask;
+    }
+
+    void setHumanCompanyMask(uint16_t mask)
+    {
+        _humanCompanyMask = mask;
     }
 
     // 0x00430319
@@ -838,6 +890,25 @@ namespace OpenLoco::CompanyManager
         gameState.playerCompanies[0] = createCompany(competitorId, true);
         gameState.playerCompanies[1] = CompanyId::null;
         updatePlayerInfrastructureOptions();
+    }
+
+    // New: allocates a company for a joining network player. Reuses the same
+    // deterministic competitor selection as AI creation (selectNewCompetitor,
+    // driven by the synced PRNG) rather than createPlayerCompany()'s
+    // machine-local Config preference, so every peer that executes the
+    // replicated createPlayerCompany command derives the same result.
+    // Deliberately does not touch playerCompanies[]/updatePlayerInfrastructureOptions()
+    // - those are per-machine "which company is mine" bookkeeping that only
+    // the owning client should set (via setControllingId on receipt of its
+    // CompanyAssignmentPacket).
+    CompanyId createJoiningPlayerCompany()
+    {
+        auto competitorId = selectNewCompetitor();
+        if (competitorId == kNullObjectId)
+        {
+            return CompanyId::null;
+        }
+        return createCompany(competitorId, true);
     }
 
     // 0x0042F9AC

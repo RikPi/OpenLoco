@@ -25,6 +25,7 @@ namespace OpenLoco::Network
         receiveChatMessage,
         gameCommand,
         desyncReport,
+        companyAssignment,
     };
 
     struct PacketHeader
@@ -131,6 +132,11 @@ namespace OpenLoco::Network
     {
         uint32_t gameCommandIndex{};
         uint32_t tick;
+        // Deterministic human-company set (session model), mirrored so a
+        // late joiner's isPlayerCompany() gating matches every other peer
+        // immediately, before it has replayed the game commands that built
+        // the set up. See CompanyManager::isHumanCompany.
+        uint16_t humanCompanyMask{};
     };
 
     struct SendChatMessage
@@ -178,6 +184,20 @@ namespace OpenLoco::Network
         uint32_t localTick{}; // tick the client had reached when it noticed
         uint32_t srand0{};    // client's PRNG state at the mismatching tick
         uint32_t srand1{};
+    };
+
+    /**
+     * Sent by the server to a specific client once it has resolved that
+     * client's join-time createPlayerCompany command, telling it which
+     * company (if any) it now controls. Only sent to the client in question,
+     * never broadcast.
+     */
+    struct CompanyAssignmentPacket
+    {
+        static constexpr PacketKind kind = PacketKind::companyAssignment;
+        size_t size() const { return sizeof(CompanyAssignmentPacket); }
+
+        CompanyId company{ CompanyId::null };
     };
 
     /**

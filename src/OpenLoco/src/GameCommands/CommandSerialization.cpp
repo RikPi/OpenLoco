@@ -7,6 +7,7 @@
 #include "GameCommands/Company/BuildCompanyHeadquarters.h"
 #include "GameCommands/Company/ChangeCompanyColour.h"
 #include "GameCommands/Company/ChangeLoan.h"
+#include "GameCommands/Company/CreatePlayerCompany.h"
 #include "GameCommands/Company/RemoveCompanyHeadquarters.h"
 #include "GameCommands/CompanyAi/AiCreateRoadAndStation.h"
 #include "GameCommands/CompanyAi/AiCreateTrackAndStation.h"
@@ -467,6 +468,11 @@ namespace OpenLoco::GameCommands
     }
 
     template<typename TArchive>
+    static void serializeArgs(TArchive&, CreatePlayerCompanyArgs&)
+    {
+    }
+
+    template<typename TArchive>
     static void serializeArgs(TArchive& ar, VehicleCloneArgs& args)
     {
         ar(args.vehicleHeadId);
@@ -640,6 +646,7 @@ namespace OpenLoco::GameCommands
         table[static_cast<size_t>(GameCommand::aiCreateRoadAndStation)] = makeTypedCodec<AiRoadAndStationPlacementArgs>();
         table[static_cast<size_t>(GameCommand::buildCompanyHeadquarters)] = makeTypedCodec<HeadquarterPlacementArgs>();
         table[static_cast<size_t>(GameCommand::removeCompanyHeadquarters)] = makeTypedCodec<HeadquarterRemovalArgs>();
+        table[static_cast<size_t>(GameCommand::createPlayerCompany)] = makeTypedCodec<CreatePlayerCompanyArgs>();
         table[static_cast<size_t>(GameCommand::createAirport)] = makeTypedCodec<AirportPlacementArgs>();
         table[static_cast<size_t>(GameCommand::removeAirport)] = makeTypedCodec<AirportRemovalArgs>();
         table[static_cast<size_t>(GameCommand::vehiclePlaceAir)] = makeTypedCodec<VehicleAirPlacementArgs>();

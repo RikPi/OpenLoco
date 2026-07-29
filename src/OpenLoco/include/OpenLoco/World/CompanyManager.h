@@ -59,6 +59,28 @@ namespace OpenLoco::CompanyManager
     uint32_t competingColourMask();
 
     void createPlayerCompany();
+
+    // Allocates a company for a joining network player. Unlike
+    // createPlayerCompany(), this is deterministic (never reads machine-local
+    // Config) and does NOT touch playerCompanies[] (that pair is per-machine
+    // "which company is mine" bookkeeping, set by the client itself via
+    // setControllingId when it receives its CompanyAssignmentPacket).
+    // Returns CompanyId::null if there is no free company slot or no
+    // competitor object available.
+    CompanyId createJoiningPlayerCompany();
+
+    // Deterministic, machine-local mirror of "which companies are human
+    // controlled". With more than the vanilla two playerCompanies[] slots in
+    // play, this is what isPlayerCompany() consults for the extra companies.
+    // Kept identical across peers because it is only ever mutated from
+    // within the replicated createPlayerCompany command (same execution on
+    // every peer) or from the snapshot's ExtraState (late joiners).
+    void markCompanyAsHuman(CompanyId id);
+    void clearHumanCompanies();
+    bool isHumanCompany(CompanyId id);
+    uint16_t getHumanCompanyMask();
+    void setHumanCompanyMask(uint16_t mask);
+
     uint8_t getHeadquarterBuildingType();
 
     // Vector of competitor object index's that are in use that aren't @id's competitor object index.

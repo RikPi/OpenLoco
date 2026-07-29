@@ -20,7 +20,11 @@ namespace OpenLoco::Network
     // Version 2: game command arguments are serialized field-by-field
     // (see GameCommands::encodeCommandArgs) instead of as a registers blob,
     // desync reporting added, and the server validates the client version.
-    constexpr uint16_t kNetworkVersion = 2;
+    // Version 3: session model Phase B - ExtraState carries the deterministic
+    // human-company set (ExtraState::humanCompanyMask) and a new
+    // CompanyAssignmentPacket tells a joining client which company (if any)
+    // it was assigned.
+    constexpr uint16_t kNetworkVersion = 3;
 
     void openServer();
     bool joinServer(std::string_view host);

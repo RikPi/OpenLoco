@@ -117,7 +117,7 @@ namespace OpenLoco::GameCommands
         clearLand = 66,
         loadMultiplayerMap = 67,
         gc_unk_68 = 68,
-        gc_unk_69 = 69,
+        createPlayerCompany = 69,
         gc_unk_70 = 70,
         sendChatMessage = 71,
         multiplayerSave = 72,
@@ -231,12 +231,13 @@ namespace OpenLoco::GameCommands
         doCommand(GameCommand::loadMultiplayerMap, regs);
     }
 
-    // Multiplayer-related
+    // Multiplayer-related (vanilla two-player leftover call site; now maps to
+    // createPlayerCompany)
     inline void do_69()
     {
         registers regs;
         regs.bl = Flags::apply;
-        doCommand(GameCommand::gc_unk_69, regs);
+        doCommand(GameCommand::createPlayerCompany, regs);
     }
 
     // Multiplayer-related
@@ -304,6 +305,7 @@ namespace OpenLoco::GameCommands
         World::WallElement* lastPlacedWall;                     // 0x01136470
         EntityId lastCreatedVehicleId;                          // 0x0113642A
         uint8_t alternateRoadObjectId;                          // 0x0112C2E9
+        CompanyId lastCreatedCompanyId;                         // new: set by createPlayerCompany on success
     };
 
     // Note: this is deliberately a mutable ref

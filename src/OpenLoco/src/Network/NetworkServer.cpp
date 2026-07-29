@@ -6,6 +6,7 @@
 #include "S5/S5.h"
 #include "Scenario/ScenarioManager.h"
 #include "SceneManager.h"
+#include "World/CompanyManager.h"
 #include <OpenLoco/Core/Exception.hpp>
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/Platform/Platform.h>
@@ -81,6 +82,18 @@ Client* NetworkServer::findClient(const INetworkEndpoint& endpoint)
     for (auto& client : _clients)
     {
         if (client->connection->getEndpoint().equals(endpoint))
+        {
+            return client.get();
+        }
+    }
+    return nullptr;
+}
+
+Client* NetworkServer::findClient(client_id_t id)
+{
+    for (auto& client : _clients)
+    {
+        if (client->id == id)
         {
             return client.get();
         }
@@ -174,6 +187,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
     ExtraState extra;
     extra.gameCommandIndex = _gameCommandIndex;
     extra.tick = ScenarioManager::getScenarioTicks();
+    extra.humanCompanyMask = CompanyManager::getHumanCompanyMask();
     ms.write(&extra, sizeof(extra));
 
     RequestStateResponse response;
@@ -199,6 +213,17 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
         offset += chunk.dataSize;
         index++;
     }
+
+    // The client now has the full snapshot in flight; queue its join
+    // assignment. Tagged with the client's id (not put on the wire - see
+    // ServerQueuedGameCommand) so runGameCommands() can route the result
+    // back to this client once the command has executed. CompanyId::null is
+    // used as the acting company: createPlayerCompany doesn't check company
+    // compatibility, it just allocates a fresh slot.
+    GameCommands::registers regs;
+    regs.esi = static_cast<int32_t>(GameCommands::GameCommand::createPlayerCompany);
+    regs.bl = GameCommands::Flags::apply;
+    queueGameCommand(CompanyId::null, regs, GameCommands::Flags::apply, client.id);
 }
 
 void NetworkServer::onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet)
@@ -371,16 +396,17 @@ void NetworkServer::sendGameCommand(const QueuedGameCommand& command)
     sendPacketToAll(packet);
 }
 
-void NetworkServer::queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)
+void NetworkServer::queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags, client_id_t requestedBy)
 {
-    QueuedGameCommand command;
-    command.index = ++_gameCommandIndex;
-    command.tick = 0;
-    command.company = company;
-    command.flags = flags;
-    command.command = static_cast<GameCommands::GameCommand>(regs.esi);
-    command.regs = regs;
-    _gameCommands.push(command);
+    ServerQueuedGameCommand sqc;
+    sqc.cmd.index = ++_gameCommandIndex;
+    sqc.cmd.tick = 0;
+    sqc.cmd.company = company;
+    sqc.cmd.flags = flags;
+    sqc.cmd.command = static_cast<GameCommands::GameCommand>(regs.esi);
+    sqc.cmd.regs = regs;
+    sqc.requestedBy = requestedBy;
+    _gameCommands.push(sqc);
 }
 
 void NetworkServer::runGameCommands()
@@ -391,10 +417,11 @@ void NetworkServer::runGameCommands()
     // Execute all following commands if previously received
     while (!_gameCommands.empty())
     {
-        auto& gc = _gameCommands.front();
+        auto& sqc = _gameCommands.front();
+        auto& gc = sqc.cmd;
         gc.tick = tick;
 
-        [[maybe_unused]] auto result = GameCommands::doCommandForReal(gc.command, gc.company, gc.regs, gc.flags);
+        auto result = GameCommands::doCommandForReal(gc.command, gc.company, gc.regs, gc.flags);
 
         // Failed commands are broadcast too: every peer must consume the same
         // command index sequence, and the deterministic simulation guarantees a
@@ -403,6 +430,31 @@ void NetworkServer::runGameCommands()
         // machine). Skipping failed commands would leave a hole in the index
         // sequence and stall all clients.
         sendGameCommand(gc);
+
+        // Join flow: resolve the client's company assignment now that the
+        // replicated createPlayerCompany command has run identically on
+        // every peer (including this server).
+        if (sqc.requestedBy != 0 && gc.command == GameCommands::GameCommand::createPlayerCompany)
+        {
+            auto* client = findClient(sqc.requestedBy);
+            if (client != nullptr)
+            {
+                if (result != GameCommands::kFailure)
+                {
+                    auto assignedCompany = GameCommands::getLegacyReturnState().lastCreatedCompanyId;
+                    client->company = assignedCompany;
+                    Logging::info("Assigned company {} to client '{}'", static_cast<uint32_t>(assignedCompany), client->name);
+
+                    CompanyAssignmentPacket packet;
+                    packet.company = assignedCompany;
+                    client->connection->sendPacket(packet);
+                }
+                else
+                {
+                    Logging::info("Could not create a company for client '{}' (no free company slot or no competitor available); leaving as spectator", client->name);
+                }
+            }
+        }
 
         _gameCommands.pop();
     }

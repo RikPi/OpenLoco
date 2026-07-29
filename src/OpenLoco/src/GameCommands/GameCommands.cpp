@@ -10,6 +10,7 @@
 #include "GameCommands/Company/ChangeCompanyColour.h"
 #include "GameCommands/Company/ChangeCompanyFace.h"
 #include "GameCommands/Company/ChangeLoan.h"
+#include "GameCommands/Company/CreatePlayerCompany.h"
 #include "GameCommands/Company/RemoveCompanyHeadquarters.h"
 #include "GameCommands/Company/RenameCompanyName.h"
 #include "GameCommands/Company/RenameCompanyOwner.h"
@@ -215,7 +216,7 @@ namespace OpenLoco::GameCommands
         { GameCommand::clearLand,                    clearLand,                 0x00469CCB, true  },
         { GameCommand::loadMultiplayerMap,           nullptr,                   0x00444DA0, false },
         { GameCommand::gc_unk_68,                    nullptr,                   0x0046F8A5, false },
-        { GameCommand::gc_unk_69,                    nullptr,                   0x004454BE, false },
+        { GameCommand::createPlayerCompany,          createPlayerCompany,       0x004454BE, false },
         { GameCommand::gc_unk_70,                    nullptr,                   0x004456C8, false },
         { GameCommand::sendChatMessage,              nullptr,                   0x0046F976, false },
         { GameCommand::multiplayerSave,              nullptr,                   0x004A0ACD, false },

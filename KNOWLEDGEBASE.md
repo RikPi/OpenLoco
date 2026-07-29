@@ -108,9 +108,51 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   recomputed per dispatch — distinct from `playerCompanies[0]`.
 - Vanilla two-player leftovers: `MultiPlayer.h` flag bag, unreachable
   `S5::LoadFlags::twoPlayer` path, hidden TitleMenu toggle, hard-coded
-  "company 0 = host, company 1 = client" convention. Command ids
-  67/69/70/72 are unimplemented multiplayer stubs (69 planned for
-  `createPlayerCompany`).
+  "company 0 = host, company 1 = client" convention. Command ids 67/70/72
+  are still unimplemented multiplayer stubs; 69 is now `createPlayerCompany`
+  (session model Phase B). `Ui.cpp`'s vanilla `do_69()` call site (under
+  `MultiPlayer::flags::flag_2`) is dead in practice on this branch but was
+  updated to reference the renamed enum value so it still compiles.
+- Session model Phase B (`createPlayerCompany`, game command id 69): a game
+  command's implementation function is called *twice* per apply (see
+  `loc_4313C6` in `GameCommands.cpp`) — once with `Flags::apply` stripped
+  (cost estimation) and once with it set (real effect). Anything that
+  consumes the synced PRNG (company allocation, competitor selection) must
+  only run on the `flags & Flags::apply` branch, exactly like
+  `removeCompanyHeadquarters`/`updateOwnerStatus`, or it desyncs by
+  advancing the RNG twice on the machine that pays for both passes.
+  `CompanyManager::createJoiningPlayerCompany()` reuses `selectNewCompetitor()`
+  (the AI-creation path) rather than `createPlayerCompany()`'s
+  Config-preferred-face logic, and deliberately does not touch
+  `playerCompanies[]` — that pair stays per-machine, set later by the
+  client itself via `setControllingId` on receipt of `CompanyAssignmentPacket`.
+- Human-company set: `CompanyManager` keeps a file-static `uint16_t`
+  bitmask (`markCompanyAsHuman`/`isHumanCompany`/`clearHumanCompanies`/
+  get·set `HumanCompanyMask`) mirroring which companies are human-controlled
+  beyond the vanilla two-slot `playerCompanies[]` pair. It is NOT part of
+  `GameState` — it is a machine-local mirror kept identical across peers
+  purely because it is only ever mutated (a) inside the replicated
+  `createPlayerCompany` command (same execution on every peer) or (b) from
+  the snapshot's `ExtraState::humanCompanyMask` for late joiners, plus one
+  direct call in `Network::openServer()` to mark the host. `isPlayerCompany`
+  now ORs membership in `playerCompanies[]` with
+  `SceneManager::isNetworked() && isHumanCompany(id)`, so single-player/AI
+  gating is untouched and only networked games consult the extra set.
+- Server-side join tagging: `NetworkServer`'s internal command queue element
+  is `ServerQueuedGameCommand { QueuedGameCommand cmd; client_id_t requestedBy; }`
+  (`requestedBy == 0` means "not join-tagged"; client ids start at 1) — this
+  tag never reaches the wire (`QueuedGameCommand`/`GameCommandPacket` are
+  unchanged). `onReceiveStateRequestPacket` queues a `createPlayerCompany`
+  command tagged with the joining client's id right after sending the last
+  state chunk; `runGameCommands()` reads `LegacyReturnState::lastCreatedCompanyId`
+  after `doCommandForReal` to resolve the assignment and send
+  `CompanyAssignmentPacket` (new, targeted, not broadcast).
+- Headless fixture caveat (still true after Phase B): OpenGraphics has zero
+  competitor objects, so `createPlayerCompany` always fails there
+  (`selectNewCompetitor()` returns `kNullObjectId`) — a joining client stays
+  spectator by design in this environment. That is the expected/passing
+  smoke-test outcome, not a bug; a richer fixture (backlog item) is needed
+  to exercise the success path.
 - Chat is packet-level (`sendChatMessage` relay), never a game command;
   UI in `Ui/Windows/Chat.cpp` (WindowType::chat = 38).
 - Windows are declared via facades in `Ui/WindowManager.h`, registered in

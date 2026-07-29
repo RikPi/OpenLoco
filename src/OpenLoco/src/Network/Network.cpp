@@ -13,6 +13,7 @@
 #include "Scenario/ScenarioManager.h"
 #include "SceneManager.h"
 #include "Ui/WindowManager.h"
+#include "World/CompanyManager.h"
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Core/FileStream.h>
 #include <OpenLoco/Core/MemoryStream.h>
@@ -122,6 +123,12 @@ namespace OpenLoco::Network
             _mode = NetworkMode::server;
             SceneManager::addSceneFlags(SceneManager::Flags::networked);
             SceneManager::addSceneFlags(SceneManager::Flags::networkHost);
+
+            // The host is always a human company; record it in the
+            // deterministic human-company set alongside the vanilla
+            // playerCompanies[] membership so both mechanisms agree.
+            CompanyManager::markCompanyAsHuman(CompanyManager::getControllingId());
+
             Gfx::invalidateScreen();
         }
         catch (...)

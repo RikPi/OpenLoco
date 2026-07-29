@@ -28,6 +28,20 @@ namespace OpenLoco::Network
         std::string message;
     };
 
+    /**
+     * Server-side-only wrapper around a queued command. requestedBy is never
+     * put on the wire (QueuedGameCommand/GameCommandPacket stay unchanged);
+     * it exists purely so runGameCommands() can, after executing a
+     * createPlayerCompany command issued by the join flow, find its way back
+     * to the client that should be assigned the resulting company.
+     * requestedBy == 0 means "not join-tagged" (client ids start at 1).
+     */
+    struct ServerQueuedGameCommand
+    {
+        QueuedGameCommand cmd;
+        client_id_t requestedBy{};
+    };
+
     class NetworkServer : public NetworkBase
     {
     private:
@@ -40,9 +54,10 @@ namespace OpenLoco::Network
         client_id_t _nextClientId = 1;
         uint32_t _lastPing{};
         uint32_t _gameCommandIndex{};
-        std::queue<QueuedGameCommand> _gameCommands;
+        std::queue<ServerQueuedGameCommand> _gameCommands;
 
         Client* findClient(const INetworkEndpoint& endpoint);
+        Client* findClient(client_id_t id);
         void createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet);
         void onReceivePacketFromClient(Client& client, const Packet& packet);
         void onReceiveStateRequestPacket(Client& client, const RequestStatePacket& packet);
@@ -77,7 +92,7 @@ namespace OpenLoco::Network
         void sendChatMessage(std::string_view message) override;
         void sendGameCommand(const QueuedGameCommand& command);
 
-        void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags);
+        void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags, client_id_t requestedBy = 0);
         void runGameCommands();
     };
 }

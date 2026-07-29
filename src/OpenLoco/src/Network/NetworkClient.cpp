@@ -2,11 +2,13 @@
 #include "Config.h"
 #include "GameCommands/GameCommands.h"
 #include "GameState.h"
+#include "Graphics/Gfx.h"
 #include "Logging.h"
 #include "Network/NetworkConnection.h"
 #include "S5/S5.h"
 #include "SceneManager.h"
 #include "Ui/WindowManager.h"
+#include "World/CompanyManager.h"
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Platform/Platform.h>
 #include <algorithm>
@@ -177,6 +179,9 @@ void NetworkClient::onReceivePacketFromServer(const Packet& packet)
         case PacketKind::gameCommand:
             receiveGameCommandPacket(*reinterpret_cast<const GameCommandPacket*>(packet.data));
             break;
+        case PacketKind::companyAssignment:
+            receiveCompanyAssignmentPacket(*reinterpret_cast<const CompanyAssignmentPacket*>(packet.data));
+            break;
         default:
             break;
     }
@@ -273,6 +278,7 @@ void NetworkClient::processFullState(std::span<uint8_t const> fullData)
     auto* extra = reinterpret_cast<const ExtraState*>(fullData.data() + fullData.size() - sizeof(ExtraState));
     _localGameCommandIndex = extra->gameCommandIndex;
     _localTick = extra->tick;
+    CompanyManager::setHumanCompanyMask(extra->humanCompanyMask);
 
     // Any commands received while the state transfer was in flight that are
     // already part of the snapshot must not be executed again. Recorded RNG
@@ -293,6 +299,23 @@ void NetworkClient::processFullState(std::span<uint8_t const> fullData)
 void NetworkClient::receiveChatMessagePacket(const ReceiveChatMessage& packet)
 {
     Network::receiveChatMessage(packet.sender, packet.getText());
+}
+
+void NetworkClient::receiveCompanyAssignmentPacket(const CompanyAssignmentPacket& packet)
+{
+    if (packet.company == CompanyId::null)
+    {
+        Logging::info("Server did not assign a company; remaining a spectator");
+        return;
+    }
+
+    // "Which company is mine" is per-machine (see KNOWLEDGEBASE.md): the
+    // snapshot we just imported carries the host's playerCompanies[], and
+    // overriding it locally here is correct and expected.
+    CompanyManager::setControllingId(packet.company);
+    CompanyManager::setSecondaryPlayerId(CompanyId::null);
+    Logging::info("Assigned company {}", static_cast<uint32_t>(packet.company));
+    Gfx::invalidateScreen();
 }
 
 void NetworkClient::receivePingPacket(const PingPacket& packet)
