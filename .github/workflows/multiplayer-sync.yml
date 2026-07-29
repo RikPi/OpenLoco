@@ -1,0 +1,112 @@
+name: Multiplayer sync smoke test
+
+# Fork-only workflow (github.com/RikPi/OpenLoco): exercises the headless
+# lockstep sync smoke test (scripts/run_sync_smoke_test.ps1) across the three
+# join policies. Standalone from upstream's ci.yml by design -- see
+# KNOWLEDGEBASE.md § CI / TASKS.md for context.
+on:
+  push:
+    branches: [ multiplayer ]
+  workflow_dispatch:
+
+concurrency:
+  group: multiplayer-sync-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  POWERSHELL_TELEMETRY_OPTOUT: 1
+
+jobs:
+  sync-smoke:
+    name: Windows x64 sync smoke test
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CONFIGURATION: Release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      # --- Mirrors ci.yml's "windows" job (preset windows / windows-release /
+      # build_dir windows, i.e. the windows-2022 matrix entry) so the vcpkg
+      # binary cache below is warmed by, and reusable across, both workflows.
+      - name: Setup cache env vars
+        run: |
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${{ github.workspace }}/vcpkg-cache" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Setup cache directories
+        run: mkdir ${{ env.VCPKG_DEFAULT_BINARY_CACHE }} | Out-Null
+
+      - name: Set up binary cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: windows-2022-64-vcpkg-${{ env.ImageVersion }}-${{ hashFiles('vcpkg*.json') }}
+          restore-keys: |
+            windows-2022-64-vcpkg-${{ env.ImageVersion }}-
+
+      - name: Build OpenLoco (App only)
+        shell: cmd
+        run: |
+          cmake --preset windows
+          cmake --build --preset windows-release --target App
+
+      # --- Headless environment prep (KNOWLEDGEBASE.md § Headless) ---
+      - name: Record headless environment paths
+        shell: pwsh
+        run: |
+          echo "OPENLOCO_BUILD_DIR=${{ github.workspace }}\build\windows\Release" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "OPENLOCO_LOCOMOTION_PATH=${{ github.workspace }}\build\fake-locomotion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "OPENLOCO_LOG_DIR=$env:APPDATA\OpenLoco\logs" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create stub install dir (Data/g1.DAT)
+        shell: pwsh
+        run: |
+          $dataDir = Join-Path $env:OPENLOCO_LOCOMOTION_PATH 'Data'
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+          [byte[]]$zero8 = ,0 * 8
+          [IO.File]::WriteAllBytes((Join-Path $dataDir 'g1.DAT'), $zero8)
+
+      - name: Write OpenLoco config (allow_multiple_instances)
+        shell: pwsh
+        run: |
+          $configDir = Join-Path $env:APPDATA 'OpenLoco'
+          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          Set-Content -Path (Join-Path $configDir 'openloco.yml') -Value 'allow_multiple_instances: true' -Encoding ascii
+
+      - name: Generate competitor object fixtures
+        shell: pwsh
+        run: python3 scripts/gen_competitor_object.py "$env:OPENLOCO_BUILD_DIR\data\objects\Competitor"
+
+      # --- Smoke matrix (scripts/run_sync_smoke_test.ps1) ---
+      # Sequential (not always()): a failing policy leaves its logs in place
+      # for the upload-on-failure step below instead of a later invocation
+      # clearing $env:APPDATA\OpenLoco\logs first.
+      - name: Smoke test - own policy (+ test-rename)
+        shell: pwsh
+        run: |
+          ./scripts/run_sync_smoke_test.ps1 -BuildDir "$env:OPENLOCO_BUILD_DIR" -LocomotionPath "$env:OPENLOCO_LOCOMOTION_PATH" -JoinPolicy own -TestRename -RunSeconds 45
+
+      - name: Smoke test - coop policy (+ test-rename)
+        shell: pwsh
+        run: |
+          ./scripts/run_sync_smoke_test.ps1 -BuildDir "$env:OPENLOCO_BUILD_DIR" -LocomotionPath "$env:OPENLOCO_LOCOMOTION_PATH" -JoinPolicy coop -TestRename -RunSeconds 45
+
+      - name: Smoke test - spectator policy
+        shell: pwsh
+        run: |
+          ./scripts/run_sync_smoke_test.ps1 -BuildDir "$env:OPENLOCO_BUILD_DIR" -LocomotionPath "$env:OPENLOCO_LOCOMOTION_PATH" -JoinPolicy spectator -RunSeconds 45
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openloco-sync-smoke-logs
+          path: ${{ env.OPENLOCO_LOG_DIR }}\*
+          if-no-files-found: warn
