@@ -58,7 +58,21 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       address 0xF254D0 for the player name — now shows the configured
       local name. Multiplayer toggle while connected now disconnects
       instead of re-entering joinServer (assert/UB).
-- [ ] Host-driven mid-session Load (redistribute snapshot to clients)
+- [x] Host-driven mid-session Load (network v5): the host loads locally
+      (importSaveToGameState + gameplay scene request), then
+      `Network::requestAllClientsResync()` resets every client's join
+      assignment, reseeds the human-company mask for the new world, and
+      sends the new `resyncRequired` packet; clients discard state,
+      re-request the snapshot ("Host loaded a new game" status) and get
+      fresh assignments. Clients attempting Load get a log-only refusal.
+      Also fixes a latent resync bug: `onReceiveStateRequestPacket` used to
+      re-run join assignment on every state request, so a desync auto-resync
+      would have created a second company — assignments are now tracked per
+      client (`assignmentResolved`) and desync resyncs re-send the existing
+      assignment instead. Verified: build clean, ctest 144/144, own+coop
+      `-TestRename` smoke PASS. Runtime load path itself is
+      compile/review-verified only — it opens a file-browse dialog, which
+      headless can't drive (see backlog: `--test_host_load` hook).
 - [x] Player roster window (client names + companies + spectators; roster
       broadcast packet). Network version bumped to 4. New `rosterUpdate`
       packet (`RosterUpdatePacket`/`RosterEntry` in `Packet.h`, variable-
@@ -114,6 +128,9 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 - [ ] Fix `Utility::nullTerminatedView` upstream-style: both loop branches
       return the same full-length view (latent bug found during the roster
       work; currently worked around by `Network::resolveDisplayName`)
+- [ ] `--test_host_load <path>` headless hook (mirror the `--test_rename`
+      pattern) so the mid-session Load flow can be exercised in the smoke
+      test without the file-browse dialog
 
 ## Backlog
 
@@ -121,8 +138,25 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       headless host+join → asserts accept count, assignment outcome,
       gameplay transition, zero error/desync lines; exit code 0/1).
       Verified for `own` and `spectator` policies.
-- [ ] Wire the smoke test into a CI workflow job (fork CI; needs the stub
-      install dir + competitor fixture generated in the job)
+- [x] (pending first green run) Wire the smoke test into a CI workflow job:
+      `.github/workflows/multiplayer-sync.yml`, a new standalone workflow
+      (ci.yml untouched) triggered on push to `multiplayer` + manual dispatch.
+      One `windows-2022` job mirrors ci.yml's Windows job (same `windows`
+      configure preset, `windows-release` build preset, same
+      `VCPKG_DEFAULT_BINARY_CACHE`/`actions/cache@v5` key shape so the vcpkg
+      binary cache is shared/warmed with ci.yml runs on the branch instead of
+      rebuilding from scratch), builds only the `App` target (Release), then
+      sets up the headless fixtures in-job (stub `Data/g1.DAT`, `openloco.yml`
+      with `allow_multiple_instances: true`, `gen_competitor_object.py`), then
+      runs `scripts/run_sync_smoke_test.ps1` three times (own+`-TestRename`,
+      coop+`-TestRename`, spectator; `-RunSeconds 45` each), uploading
+      `%APPDATA%\OpenLoco\logs\*` on failure. Everything short of actually
+      executing on Actions was validated locally (YAML parse, every
+      referenced path/script/preset exists, the stub-creation PowerShell
+      snippets run correctly against a scratch dir, `gen_competitor_object.py`
+      accepts an explicit output-dir arg) — see KNOWLEDGEBASE.md § CI for
+      what only the first real run can prove (loopback/firewall behavior on
+      hosted runners, actual vcpkg cache hit, wall-clock time).
 - [x] Fixture where the host owns a company: gensave now creates a player
       company when a competitor object is available, and
       `gen_competitor_object.py` emits 8 distinct competitors (a company

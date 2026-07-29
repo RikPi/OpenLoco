@@ -142,11 +142,31 @@ namespace OpenLoco::Game
         }
         else if (SceneManager::isNetworked())
         {
-            // Loading a different save mid-session would need a coordinated
-            // host-driven state redistribution; not supported yet. (Vanilla
-            // set two-player handshake flags here that resolved to
-            // unimplemented commands.)
-            Diagnostics::Logging::warn("Loading a game is not available while in a network session");
+            if (SceneManager::isNetworkHost())
+            {
+                // The host may replace the session state mid-game: load
+                // locally, then make every client discard its world and
+                // resync against the new one (join assignments are reset
+                // and re-resolved during the resync).
+                if (auto res = Game::loadSaveGameOpen())
+                {
+                    auto path = fs::u8path(*res).replace_extension(S5::extensionSV5);
+                    _activeSavePath = path.u8string();
+
+                    if (S5::importSaveToGameState(path, S5::LoadFlags::none))
+                    {
+                        SceneManager::requestScene(SceneManager::SceneId::gameplay);
+                        Network::requestAllClientsResync();
+                    }
+                    // On failure S5 records a load error which the game
+                    // scene surfaces on the next tick
+                }
+            }
+            else
+            {
+                // Clients cannot replace the shared session state
+                Diagnostics::Logging::warn("Only the host can load a game during a network session");
+            }
         }
 
         // 0x0043C0D1

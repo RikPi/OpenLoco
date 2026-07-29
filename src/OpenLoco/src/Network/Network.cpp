@@ -331,6 +331,19 @@ namespace OpenLoco::Network
         }
     }
 
+    void requestAllClientsResync()
+    {
+        if (_mode == NetworkMode::server)
+        {
+            // The freshly loaded world defines a new human-company set:
+            // just the host's company until clients re-join it
+            CompanyManager::clearHumanCompanies();
+            CompanyManager::markCompanyAsHuman(CompanyManager::getControllingId());
+
+            _server->requestAllClientsResync();
+        }
+    }
+
     void saveDesyncDump(std::string_view role, uint32_t mismatchTick, uint32_t currentTick)
     {
         try

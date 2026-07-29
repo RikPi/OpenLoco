@@ -20,6 +20,13 @@ namespace OpenLoco::Network
         // commands accepted). Assigned by the server during the join flow;
         // never trusted from the wire.
         CompanyId company{ CompanyId::null };
+
+        // Whether the join assignment has been resolved for this client.
+        // A state re-request (desync resync) must NOT run the assignment
+        // again - it would create another company - only re-send the
+        // existing one so the client can restore its controlling id after
+        // applying the fresh snapshot.
+        bool assignmentResolved{};
     };
 
     struct ChatMessage
@@ -95,6 +102,10 @@ namespace OpenLoco::Network
 
         void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags, client_id_t requestedBy = 0);
         void runGameCommands();
+
+        // Host loaded a different save mid-session: reset every client's
+        // join assignment and tell them to resync against the new world
+        void requestAllClientsResync();
 
         // Builds the authoritative roster from the live client list plus the
         // host itself (client_id_t 0). Used both to broadcast

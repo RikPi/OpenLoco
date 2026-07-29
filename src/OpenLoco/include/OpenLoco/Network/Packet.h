@@ -28,6 +28,7 @@ namespace OpenLoco::Network
         companyAssignment,
         rosterUpdate,
         serverClosing,
+        resyncRequired,
     };
 
     struct PacketHeader
@@ -250,6 +251,18 @@ namespace OpenLoco::Network
     {
         static constexpr PacketKind kind = PacketKind::serverClosing;
         size_t size() const { return sizeof(ServerClosingPacket); }
+    };
+
+    /**
+     * Sent by the server when the whole session state has been replaced
+     * (host loaded a different save mid-session). Clients must discard
+     * their state and re-request the snapshot; join assignments have been
+     * reset and will be re-resolved during the resync. No payload.
+     */
+    struct ResyncRequiredPacket
+    {
+        static constexpr PacketKind kind = PacketKind::resyncRequired;
+        size_t size() const { return sizeof(ResyncRequiredPacket); }
     };
 
     /**

@@ -29,7 +29,11 @@ namespace OpenLoco::Network
     // Version 4: player roster (RosterUpdatePacket, presentation data only -
     // never touches GameState/game commands) and graceful server shutdown
     // notification (ServerClosingPacket).
-    constexpr uint16_t kNetworkVersion = 4;
+    // Version 5: host-driven mid-session load - ResyncRequiredPacket makes
+    // every client discard its state and re-request the snapshot; join
+    // assignments are re-resolved against the newly loaded world (while
+    // desync resyncs now deliberately keep the existing assignment).
+    constexpr uint16_t kNetworkVersion = 5;
 
     /**
      * Machine-local snapshot of one player/spectator, used to drive the
@@ -72,6 +76,14 @@ namespace OpenLoco::Network
      * received from the server.
      */
     std::vector<PlayerRosterEntry> getPlayerRoster();
+
+    /**
+     * Host only: after the local game state has been replaced (a different
+     * save was loaded mid-session), resets every client's join assignment
+     * and tells them to discard their state and resync against the new
+     * world.
+     */
+    void requestAllClientsResync();
 
     void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags);
     bool shouldProcessTick(uint32_t tick);

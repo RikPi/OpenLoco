@@ -94,6 +94,67 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   without manually deleting the cache (deleting it is harmless and was done
   once here for a clean-slate check).
 
+## CI
+
+- `.github/workflows/multiplayer-sync.yml`: a new, standalone workflow (does
+  NOT modify upstream's `.github/workflows/ci.yml`) that runs the headless
+  sync smoke matrix on push to `multiplayer` + `workflow_dispatch`, on this
+  fork (github.com/RikPi/OpenLoco).
+- One `windows-2022` job, deliberately mirroring ci.yml's Windows job (the
+  `windows-2022` matrix entry: `windows` configure preset, `windows-release`
+  build preset, `build\windows\Release` output) so the `actions/cache@v5`
+  vcpkg binary cache key (`windows-2022-64-vcpkg-${{ env.ImageVersion }}-${{
+  hashFiles('vcpkg*.json') }}`) is byte-for-byte the same as ci.yml's — cache
+  entries are shared across workflows on the same ref, so this job rides on
+  the cache ci.yml already warms on the branch instead of rebuilding vcpkg
+  packages from scratch. Only the `App` target is built (not
+  `OpenLocoTests`); `vcpkg.json` is a manifest (no per-target feature gating),
+  so the same deps install either way — skipping the test target only saves
+  its compile time.
+- Headless fixtures are (re)created in-job every run, not committed: stub
+  `Data\g1.DAT` (8 zero bytes) under a workspace-relative
+  `build\fake-locomotion`, `%APPDATA%\OpenLoco\openloco.yml` with
+  `allow_multiple_instances: true`, and `python3 scripts/gen_competitor_object.py`
+  pointed explicitly at `build\windows\Release\data\objects\Competitor` (the
+  script's own default assumes that same layout when run with no args, but
+  the job passes it explicitly — see prior note on `$PSScriptRoot`-relative
+  defaults not matching CI's working directory in general).
+- Smoke matrix: three sequential `scripts\run_sync_smoke_test.ps1`
+  invocations (own+`-TestRename`, coop+`-TestRename`, spectator),
+  `-RunSeconds 45` each, explicit `-BuildDir`/`-LocomotionPath` (never rely on
+  the script's `$PSScriptRoot`-derived defaults from a CI working directory).
+  Deliberately NOT wrapped in `if: always()` — the script clears
+  `%APPDATA%\OpenLoco\logs` at the start of each run, so if an earlier policy
+  fails and a later step still ran, its fresh log-dir wipe would destroy the
+  failing run's diagnostic logs before the final upload step ever sees them.
+  Default step semantics (stop the job on first failing step) keep the
+  failing run's logs intact for `actions/upload-artifact@v4` (`if: failure()`,
+  path `%APPDATA%\OpenLoco\logs\*`, `if-no-files-found: warn` since the dir
+  may not exist yet if the build itself failed).
+- Locally validated (this cannot be done for the Actions run itself, only its
+  static ingredients): the YAML parses (`python3 -c "import yaml;
+  yaml.safe_load(open(...))"`; pyyaml renders the bare `on:` key as Python
+  `True` — a known YAML-1.1 quirk in the *parser*, not a workflow bug, GitHub
+  Actions itself reads it as the string key); every referenced path exists
+  (`scripts/run_sync_smoke_test.ps1`, `scripts/gen_competitor_object.py`, the
+  `windows`/`windows-release` CMake presets); the smoke script's parameter
+  names (`-BuildDir`, `-LocomotionPath`, `-JoinPolicy`, `-TestRename`,
+  `-RunSeconds`) match what the workflow passes; the stub-`g1.DAT` and
+  `openloco.yml`-write PowerShell snippets were run verbatim against a
+  scratch temp dir (confirmed: 8 zero bytes, no BOM on the YAML file); `git
+  describe`-based versioning (`cmake/OpenLocoVersion.cmake` calls
+  `find_package(Git)`) is why `fetch-depth: 0` is kept, matching ci.yml.
+- What only a real Actions run can prove: actual vcpkg binary-cache hit rate
+  (first run on the branch has to build vcpkg packages for real — same as
+  ci.yml's first run ever did); whether UDP loopback (127.0.0.1) triggers any
+  interactive Windows Firewall prompt on a hosted `windows-2022` runner — no
+  contrary evidence found (Windows Filtering Platform documentation states
+  loopback traffic is exempt from WFP filtering, and hosted runners have no
+  interactive desktop session to show a GUI prompt anyway, but this project
+  has not observed it directly); actual wall-clock time against the 60-minute
+  job timeout; whether `python3` (vs `python`) resolves on the actual
+  `windows-2022` image as assumed.
+
 ## Lockstep architecture facts
 
 - One tick = `GameScene::tick()`: gate on `Network::shouldProcessTick`,

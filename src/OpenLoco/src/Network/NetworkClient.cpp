@@ -321,9 +321,27 @@ void NetworkClient::onReceivePacketFromServer(const Packet& packet)
         case PacketKind::serverClosing:
             receiveServerClosingPacket(*reinterpret_cast<const ServerClosingPacket*>(packet.data));
             break;
+        case PacketKind::resyncRequired:
+            receiveResyncRequiredPacket(*reinterpret_cast<const ResyncRequiredPacket*>(packet.data));
+            break;
         default:
             break;
     }
+}
+
+void NetworkClient::receiveResyncRequiredPacket([[maybe_unused]] const ResyncRequiredPacket& packet)
+{
+    if (_status != NetworkClientStatus::connected)
+    {
+        return;
+    }
+
+    // The host replaced the session state (loaded a different save). Our
+    // world and company assignment are void; discard and resync. A fresh
+    // assignment arrives during the resync flow.
+    Logging::info("Host loaded a new game; resyncing");
+    Ui::Windows::Chat::addMessage("Server", "Host loaded a new game; resyncing...");
+    beginResync("Host loaded a new game, receiving state...");
 }
 
 void NetworkClient::sendConnectPacket()
@@ -616,10 +634,10 @@ void NetworkClient::onDesyncDetected(const PingPacket& serverState, const TickRn
         _serverConnection->sendPacket(report);
     }
 
-    beginResync();
+    beginResync("Desync detected, resyncing with server...");
 }
 
-void NetworkClient::beginResync()
+void NetworkClient::beginResync(std::string_view statusText)
 {
     Logging::info("Requesting full state resync from server");
 
@@ -628,7 +646,7 @@ void NetworkClient::beginResync()
     _tickRngHistory.clear();
     _pendingServerStates.clear();
 
-    initStatus("Desync detected, resyncing with server...");
+    initStatus(statusText);
     sendRequestStatePacket();
 }
 

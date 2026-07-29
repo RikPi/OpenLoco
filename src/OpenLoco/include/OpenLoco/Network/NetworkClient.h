@@ -109,10 +109,11 @@ namespace OpenLoco::Network
         void receiveCompanyAssignmentPacket(const CompanyAssignmentPacket& packet);
         void receiveRosterUpdatePacket(const RosterUpdatePacket& packet);
         void receiveServerClosingPacket(const ServerClosingPacket& packet);
+        void receiveResyncRequiredPacket(const ResyncRequiredPacket& packet);
 
         void checkForDesync();
         void onDesyncDetected(const PingPacket& serverState, const TickRngState& localState);
-        void beginResync();
+        void beginResync(std::string_view statusText);
 
     protected:
         void onClose() override;

@@ -230,8 +230,20 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
         index++;
     }
 
-    // The client now has the full snapshot in flight; resolve its join
-    // assignment according to the host's policy.
+    // The client now has the full snapshot in flight. If its join assignment
+    // was already resolved (this is a resync after a desync, not a first
+    // join), only re-send the existing assignment so the client can restore
+    // its controlling id after applying the fresh snapshot - running the
+    // assignment again would create another company.
+    if (client.assignmentResolved)
+    {
+        CompanyAssignmentPacket packet;
+        packet.company = client.company;
+        client.connection->sendPacket(packet);
+        return;
+    }
+
+    // First join: resolve the assignment according to the host's policy.
     switch (getCommandLineOptions().joinPolicy)
     {
         case JoinPolicy::coop:
@@ -248,6 +260,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
                 Logging::info("Host has no company; client '{}' joins as spectator", client.name);
             }
 
+            client.assignmentResolved = true;
             CompanyAssignmentPacket packet;
             packet.company = client.company;
             client.connection->sendPacket(packet);
@@ -257,6 +270,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
         case JoinPolicy::spectator:
         {
             Logging::info("Client '{}' joins as spectator (host join policy)", client.name);
+            client.assignmentResolved = true;
             CompanyAssignmentPacket packet;
             packet.company = CompanyId::null;
             client.connection->sendPacket(packet);
@@ -278,6 +292,27 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
             queueGameCommand(CompanyId::null, regs, GameCommands::Flags::apply, client.id);
             break;
         }
+    }
+}
+
+void NetworkServer::requestAllClientsResync()
+{
+    for (auto& client : _clients)
+    {
+        // The old world's assignments are meaningless in the newly loaded
+        // one; clients get fresh assignments during their resync. Until
+        // then they are spectators (their commands are dropped).
+        client->company = CompanyId::null;
+        client->assignmentResolved = false;
+
+        ResyncRequiredPacket packet;
+        client->connection->sendPacket(packet);
+    }
+
+    if (!_clients.empty())
+    {
+        Logging::info("Requested resync from {} client(s) after state reload", _clients.size());
+        broadcastRosterUpdate();
     }
 }
 
@@ -528,6 +563,7 @@ void NetworkServer::runGameCommands()
             auto* client = findClient(sqc.requestedBy);
             if (client != nullptr)
             {
+                client->assignmentResolved = true;
                 if (result != GameCommands::kFailure)
                 {
                     auto assignedCompany = GameCommands::getLegacyReturnState().lastCreatedCompanyId;
