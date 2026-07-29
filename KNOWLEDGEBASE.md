@@ -1128,6 +1128,76 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   clean (`App` + `OpenLocoTests`), `ctest -C Release` 145/145, `-TestRename`
   (own policy, 60s run) still PASSes with the verified rename line.
 
+## Master server (phase 2 service, `tools/master-server/`)
+
+- Toolchain (this machine): Go 1.26.5 at
+  `C:\Users\rikyt\AppData\Local\Programs\go\bin\go.exe` — **not on PATH**,
+  invoke by full path or prepend it for the session:
+  `$env:Path += ';C:\Users\rikyt\AppData\Local\Programs\go\bin'` (PowerShell)
+  or `export PATH="$PATH:/c/Users/rikyt/AppData/Local/Programs/go/bin"`
+  (git-bash). No Docker daemon available on this machine at the time of
+  writing — the Dockerfile is written (multi-stage, `CGO_ENABLED=0`,
+  `gcr.io/distroless/static-debian12:nonroot`) but only compile-reviewed,
+  not build-verified; verification instead ran the native
+  `master-server.exe` directly.
+- Build/test commands (from `tools/master-server/`):
+  `go vet ./...`, `go test ./...` (26 tests: `protocol_test.go`,
+  `registry_test.go`, `integration_test.go` — the last spins a real UDP
+  listener on an ephemeral loopback port), `go build -o master-server.exe .`.
+  `go.mod` has zero `require` entries (stdlib only, per spec).
+- Chosen `PacketKind` values (hard-coded in `protocol.go`, must match a
+  future `Packet.h` change exactly): the enum on this branch currently ends
+  at `discoveryResponse = 17` (`unknown=0` ... `discoveryRequest=16,
+  discoveryResponse=17`). The three new kinds are appended immediately
+  after, in this order: `masterAnnounce = 18`, `masterQuery = 19`,
+  `masterServerList = 20`. If `Packet.h` gains any enum value before this
+  service's game-side counterpart lands, these must be re-checked against
+  the enum's actual tail at that time — nothing enforces the two sides
+  agree except this note and manual care.
+- `masterServerList` entry cap derivation (also in `protocol.go` as
+  `kMaxServerListEntries` and in the README): `kMaxPacketDataSize` = 4090
+  (`kMaxPacketSize` 4096 − 6-byte `PacketHeader`); the list payload's own
+  header (`cookie` + `count`) is 5 bytes; one entry is 43 bytes
+  (`4 ipv4 + 2 port + 2 version + 1 playerCount + 1 maxPlayers + 1
+  joinPolicy + 1 nameLength + 31 name`). `floor((4090-5)/43) = 95`, and
+  `95*43 = 4085` exactly — the cap is the tightest one that fits with zero
+  wasted remainder. Enforced twice: once where the reply list is built
+  (`udp.go`'s `handleQuery` truncates the registry snapshot before
+  encoding) and again inside `EncodeMasterServerList` itself as a backstop,
+  so the encoder can never be made to emit an oversized packet even if a
+  future caller forgets to pre-truncate.
+- `ipv4` is the one field in the whole protocol that is **not**
+  little-endian: per the design doc it's "network byte order" (i.e. octet
+  order — 1.2.3.4 → bytes `{1,2,3,4}` in that order on the wire), matching
+  how a raw `sin_addr`-style address is naturally laid out. Every other
+  field (`port`, `version`, counts, etc.) is little-endian like the rest of
+  the game's framing.
+- Registry keying: `(observed source IP, advertised gamePort)` — not the
+  announce's UDP source *port* (ephemeral, irrelevant) — so one host can
+  register several game servers on different ports. A repeat announce for
+  an existing key refreshes `LastSeen` (and any changed fields) rather than
+  creating a duplicate; the per-IP cap and the overall registry bound are
+  therefore only ever checked when inserting a genuinely *new* key — a
+  refresh at either cap must still succeed (covered by
+  `TestRegistryPerIPCap`'s last assertion).
+- End-to-end manual verification (native Windows binary, ephemeral ports,
+  no Docker): a throwaway Go client script sent two `masterAnnounce`s from
+  the same source (proving refresh-not-duplicate) then a `masterQuery`,
+  got back a `masterServerList` with exactly one entry and correct
+  name/port/version/counts; `GET /servers` showed the same entry as JSON
+  right after the announce, then an empty array again after a short
+  `-ttl 6s` elapsed (TTL sweeper confirmed live); graceful shutdown was
+  confirmed by sending a Windows `CTRL_BREAK_EVENT` to a child process
+  started with `CREATE_NEW_PROCESS_GROUP` (the practical way to deliver
+  what the Go runtime maps to `os.Interrupt` on Windows, since
+  `os.Process.Signal(os.Interrupt)` on an arbitrary child process returns
+  "not supported by windows") — log showed `shutting down...` then
+  `shutdown complete` and the process exited cleanly.
+- Not yet started: the game-side half of phase 2 (Packet.h enum/payload
+  additions, `NetworkServer` periodic announce sender, in-game browser
+  query + merge with LAN discovery results, `network.masterServer` config
+  value). This service is master-server-only.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the

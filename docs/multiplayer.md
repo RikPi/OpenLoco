@@ -153,18 +153,39 @@ directly) — the prompt itself lives on in the browser's "Join by address"
 button, sharing `Network::parseServerAddress` with the browser's row-click
 path. Discovery runs only while the window is open.
 
-### Master server (phase 2 — constraints)
+### Master server (phase 2 — design)
 
-Out of scope for this pass, but the LAN design above should not preclude it:
-a future internet-wide server list needs only a tiny, stateless HTTP
-announce/list service (a single small binary, or something free-tier-hosting
-friendly like a personal VPS or Cloudflare-Workers-class platform — no
-database or persistent session state required). Servers would announce
-themselves to it periodically with a TTL (so a crashed/killed server simply
-expires off the list rather than needing explicit deregistration); the
-master service's URL would be an ordinary config value; and the in-game
-browser would merge its results with LAN discovery into one list. None of
-this is implemented here.
+An internet-wide server list, revised from the earlier "HTTP announce"
+sketch: the master speaks the game's own UDP packet framing instead of
+HTTP, so the game reuses its tested discovery machinery and gains no HTTP
+client dependency. The service (`tools/master-server/`, Go, single static
+binary — runs identically on a personal VPS under systemd or on a
+UDP-capable free tier such as Fly.io; a container image is provided) is
+stateless: an in-memory registry with TTL expiry, no database.
+
+Protocol (game `Packet` framing, little-endian, connectionless):
+
+- `masterAnnounce` (game server → master, every ~30 s and on roster
+  change): version, game port, player count/max, join policy, host name.
+  The master records the announce's *observed* source address plus the
+  advertised game port — i.e. the public endpoint. Entries expire after
+  ~90 s without a fresh announce, so crashed servers just fall off.
+- `masterQuery` (browser → master): cookie.
+- `masterServerList` (master → browser): cookie echo + entries
+  (address, port, version, players, policy, name). IPv4 only in v1.
+
+Game integration: `network.masterServer` config value ("host:port", empty
+disables); a hosting server announces when set; the in-game browser
+queries the master alongside LAN probes and merges both into one list
+(entries tagged by source). Known v1 limitation: no NAT traversal — an
+internet-reachable host must forward its game port; the master only makes
+it *discoverable*, not *reachable*.
+
+Service hardening: per-IP announce cap, bounded registry size, no
+amplification (list responses only to queriers that sent a well-formed
+request; response size bounded), structured logs, graceful shutdown. A
+small HTTP `GET /servers` JSON endpoint on a separate port serves humans
+and monitoring, not the game.
 
 ## Test strategy
 

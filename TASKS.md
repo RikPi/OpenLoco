@@ -371,6 +371,74 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       periodic announces, a config-value master URL, in-game browser merges
       master + LAN results) — explicitly not implemented.
 
+## Milestone: master server (phase 2 — service half done)
+
+- [x] **Master server service** (design: `docs/multiplayer.md` § Master
+      server (phase 2 — design)). Standalone Go service, stdlib only,
+      `tools/master-server/` (`go.mod` — no `require` entries):
+      `main.go` (flags, UDP/HTTP server wiring, TTL sweeper ticker, graceful
+      SIGINT/SIGTERM shutdown), `protocol.go` (wire framing + payload
+      encode/decode), `registry.go` (in-memory TTL registry, per-IP cap,
+      overall bound), `udp.go` (the announce/query request loop).
+      Speaks the game's own `Packet.h` framing rather than HTTP — three new
+      connectionless `PacketKind` values appended immediately after the
+      existing `discoveryResponse` (17), matching the same
+      no-`NetworkConnection`/no-acks/`sequence=0` pattern discovery already
+      uses: `masterAnnounce = 18`, `masterQuery = 19`,
+      `masterServerList = 20`. **These numeric values are load-bearing for
+      the not-yet-done game-side change** — Packet.h must append the three
+      kinds in exactly this order so its enum values match what this
+      service hard-codes.
+      `masterServerList`'s entry cap is derived, not guessed:
+      `kMaxPacketDataSize` (4090) minus the payload's own cookie+count
+      header (5) leaves 4085 bytes; each entry is 43 bytes
+      (`4+2+2+1+1+1+1+31`); `floor(4085/43) = 95` entries, and 95×43 = 4085
+      exactly (no wasted/overflowing remainder) — enforced both where the
+      list is built and again inside the encoder as a hard backstop, so a
+      reply can never exceed a small fixed bound regardless of registry
+      size (no amplification).
+      Registry: keyed by (observed source IP, advertised `gamePort`) so one
+      host can announce multiple game servers on different ports; a repeat
+      announce for the same key refreshes the TTL instead of duplicating;
+      per-IP cap and overall registry bound are enforced only on *new* keys
+      (a refresh of an existing entry never gets rejected by either cap).
+      IPv4 only v1 — IPv6 sources are ignored (logged only under
+      `-verbose`).
+      Tests: `protocol_test.go` (framing round-trip, malformed/truncated
+      packet rejection, `masterAnnounce`/`masterQuery`/`masterServerList`
+      encode/decode round-trips, name trimming/rejection, the 95-entry cap
+      boundary), `registry_test.go` (upsert/refresh, per-IP cap, overall
+      bound, TTL expiry incl. refresh-resets-the-clock, deterministic
+      `List()` ordering), `integration_test.go` (spins a real UDP listener
+      on an ephemeral loopback port, drives announce → announce (refresh) →
+      query → `masterServerList` over an actual socket, plus a
+      malformed/unknown-kind-packets-don't-crash-the-loop case). All green:
+      `go vet ./...` clean, `go test ./...` 26/26 PASS, `go build` produces
+      `master-server.exe`.
+      Manually verified end-to-end on Windows (native binary, no Docker
+      available to test with — Dockerfile is written but unverified):
+      built and ran the exe on ephemeral ports with a throwaway Go client
+      script — two announces from the same source (refresh, not a
+      duplicate) followed by a query returned a `masterServerList` with
+      exactly one entry and the correct name/port/version/counts; `GET
+      /servers` showed the same entry as JSON immediately after the
+      announce and an empty array again once a short `-ttl` (6s) elapsed;
+      a `CTRL_BREAK_EVENT` (the Windows equivalent this environment can
+      actually deliver to a child console process, mapped by the Go
+      runtime to `os.Interrupt`) produced the "shutting down..." /
+      "shutdown complete" log lines and a clean exit, confirming graceful
+      shutdown.
+      `README.md`: protocol tables, flags, `GET /servers` JSON shape,
+      systemd unit example, Docker build/run, and a Fly.io `fly.toml`
+      sketch (UDP + HTTP service blocks) — noting the in-memory registry
+      means a redeploy just drops entries, which self-heals within one TTL
+      window as hosts re-announce.
+      **Not done yet** (the other half of phase 2): the game-side change
+      (`Packet.h` enum append + payload structs, `NetworkServer` periodic
+      announce sender, in-game browser query + merge with LAN discovery
+      results, `network.masterServer` config value) — none of that is
+      touched by this commit, which is master-server-service-only.
+
 ## Backlog
 
 - [x] Scripted smoke test: `scripts/run_sync_smoke_test.ps1` (gensave →
@@ -452,10 +520,12 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 - [x] Reconnect - done, see Milestone 2 above and KNOWLEDGEBASE.md § Reconnect
       implementation notes / § Reconnect test hook. Host migration remains
       explicitly out of scope per the design doc and is not addressed.
-- [x] Lobby & server browser — phase 1 (LAN discovery) done, see the
+- [ ] Lobby & server browser — phase 1 (LAN discovery) done, see the
       completed "LAN server discovery" item below. Phase 2 (internet master
-      server) is explicitly out of scope; see docs/multiplayer.md § Master
-      server (phase 2 — constraints) for the design note only.
+      server): the standalone Go service is done (see "Milestone: master
+      server (phase 2 — service half done)" above); the game-side half
+      (Packet.h additions, periodic announce sender, browser query/merge,
+      `network.masterServer` config value) is not yet started.
 - [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
 - [x] Graceful shutdown for `--headless`: hidden `--test_shutdown_after
       <seconds>` CLI-driven hook (`CommandLine.{h,cpp}`, deliberately not in
