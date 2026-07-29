@@ -136,7 +136,7 @@ namespace OpenLoco::Utility
         {
             if (src[i] == '\0')
             {
-                return std::string_view(src, N);
+                return std::string_view(src, i);
             }
         }
         return std::string_view(src, N);

@@ -10,8 +10,10 @@
 #include "SceneManager.h"
 #include "World/CompanyManager.h"
 #include <OpenLoco/Core/Exception.hpp>
+#include <OpenLoco/Core/FileSystem.hpp>
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/Platform/Platform.h>
+#include <algorithm>
 #include <span>
 
 using namespace OpenLoco;
@@ -58,6 +60,8 @@ void NetworkServer::listen(const std::string& bind, port_t port)
 
     SceneManager::addSceneFlags(SceneManager::Flags::networked);
     SceneManager::addSceneFlags(SceneManager::Flags::networkHost);
+
+    _startTime = Platform::getTime();
 
     Logging::info("Server opened");
     for (const auto& socket : _sockets)
@@ -316,6 +320,88 @@ void NetworkServer::requestAllClientsResync()
     }
 }
 
+// Headless test hook (--test_host_load <seconds>). Driven from onUpdate(),
+// i.e. the main-thread loop outside GameScene::tick() -- mirrors how the
+// client-side --test_rename hook drives itself from its own onUpdate(), and
+// keeps this out of the deterministic tick section entirely. Once armed
+// (uptime elapsed and at least one client fully assigned), this is the
+// programmatic equivalent of Game::loadGame's networked-host mid-session
+// Load flow (see Game.cpp), minus the file-browse dialog: reload the same
+// fixture the host was started with, request the gameplay scene, then tell
+// every client to discard its state and resync.
+void NetworkServer::updateTestHostLoadHook()
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testHostLoad.has_value() || _testHostLoadDone)
+    {
+        return;
+    }
+
+    auto elapsedMs = Platform::getTime() - _startTime;
+    if (elapsedMs < static_cast<uint32_t>(*options.testHostLoad) * 1000)
+    {
+        return;
+    }
+
+    // Wait for at least one client to have a resolved join assignment --
+    // reloading before anyone has joined would prove nothing about the
+    // resync path.
+    auto anyAssigned = std::any_of(_clients.begin(), _clients.end(), [](const auto& client) { return client->assignmentResolved; });
+    if (!anyAssigned)
+    {
+        return;
+    }
+
+    _testHostLoadDone = true;
+
+    if (S5::importSaveToGameState(fs::u8path(options.path), S5::LoadFlags::none))
+    {
+        SceneManager::requestScene(SceneManager::SceneId::gameplay);
+        Logging::info("[TEST] host reloaded save");
+        // Fully-qualified: NetworkServer also has a member of this name
+        // (called below by this facade); the facade additionally resets the
+        // deterministic human-company set for the freshly loaded world
+        // before resyncing clients (see Network.cpp).
+        Network::requestAllClientsResync();
+    }
+    else
+    {
+        Logging::error("[TEST] host failed to reload save '{}'", options.path);
+    }
+}
+
+// Headless test hook (--test_shutdown_after <seconds>). Driven from
+// onUpdate(), same rationale as updateTestHostLoadHook() above. Calling the
+// inherited close() (NetworkBase::close(), resolved unqualified here because
+// class-member lookup hides the free Network::close() facade of the same
+// name) is the already-established pattern for closing from inside this
+// object's own update path -- see NetworkClient::receiveServerClosingPacket,
+// which does the same thing from inside a packet handler. It only flips
+// _isClosed and runs onClose() (which sends ServerClosingPacket and drops
+// the networked scene flags); the owning unique_ptr is reset by
+// Network::tick() only after this call returns, so there is no
+// self-destruction hazard. The host process is not exited: with the
+// networked flags gone it simply continues running as single-player.
+void NetworkServer::updateTestShutdownHook()
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testShutdownAfter.has_value() || _testShutdownTriggered)
+    {
+        return;
+    }
+
+    auto elapsedMs = Platform::getTime() - _startTime;
+    if (elapsedMs < static_cast<uint32_t>(*options.testShutdownAfter) * 1000)
+    {
+        return;
+    }
+
+    _testShutdownTriggered = true;
+
+    Logging::info("[TEST] closing server");
+    close();
+}
+
 void NetworkServer::onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet)
 {
     std::unique_lock<std::mutex> lk(_chatMessageQueueSync);
@@ -463,6 +549,8 @@ void NetworkServer::onUpdate()
     sendChatMessages();
     sendPings();
     removedTimedOutClients();
+    updateTestHostLoadHook();
+    updateTestShutdownHook();
 }
 
 void NetworkServer::updateClients()

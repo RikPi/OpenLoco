@@ -103,6 +103,8 @@ namespace OpenLoco::Config
         {
             auto& networkConfig = _config.network;
             networkConfig.enabled = networkNode["enabled"].as<bool>(true);
+            networkConfig.bind = networkNode["bind"].as<std::string>("");
+            networkConfig.port = networkNode["port"].as<uint16_t>(11754);
         }
 
         // General
@@ -253,6 +255,8 @@ namespace OpenLoco::Config
         const auto& networkConfig = _config.network;
         auto networkNode = node["network"];
         networkNode["enabled"] = networkConfig.enabled;
+        networkNode["bind"] = networkConfig.bind;
+        networkNode["port"] = networkConfig.port;
         node["network"] = networkNode;
 
         // General

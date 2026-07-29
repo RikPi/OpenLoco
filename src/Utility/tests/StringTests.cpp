@@ -223,3 +223,15 @@ TEST(StringTests, trim)
     EXPECT_EQ(Utility::trim(" "), "");
     EXPECT_EQ(Utility::trim(""), "");
 }
+
+TEST(StringTests, nullTerminatedView)
+{
+    const char padded[8] = { 'a', 'b', 'c', '\0', 'x', 'x', 'x', 'x' };
+    EXPECT_EQ(Utility::nullTerminatedView(padded), "abc");
+
+    const char full[4] = { 'f', 'u', 'l', 'l' };
+    EXPECT_EQ(Utility::nullTerminatedView(full), "full");
+
+    const char empty[4] = { '\0', 'x', 'x', 'x' };
+    EXPECT_EQ(Utility::nullTerminatedView(empty), "");
+}

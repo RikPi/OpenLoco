@@ -23,7 +23,18 @@ namespace OpenLoco::Ui::Windows::Chat
 {
     static constexpr Ui::Size kWindowSize = { 320, 182 };
     static constexpr uint8_t kLineHeight = 11;
-    static constexpr size_t kMaxMessages = 12;
+    // History storage cap. Kept well above the number of lines the window
+    // can actually show at once (kVisibleMessages) so scrolling back through
+    // recent chat history isn't lost the moment a handful of new messages
+    // arrive - draw() only ever renders the most recent kVisibleMessages
+    // entries (see draw() below for why this is a "render the tail" approach
+    // rather than a real ScrollView: the window has no scrollbar/viewport
+    // widget today, and adding one is a bigger change than this pass's
+    // scope - noted here as a follow-up rather than done).
+    static constexpr size_t kMaxMessages = 100;
+    // Fixed number of lines actually drawn - matches the panel's available
+    // height, same as the old kMaxMessages value.
+    static constexpr size_t kVisibleMessages = 12;
 
     enum widx
     {
@@ -31,12 +42,14 @@ namespace OpenLoco::Ui::Windows::Chat
         caption,
         closeBtn,
         panel,
+        playersBtn,
         sendBtn,
     };
 
     namespace Widx
     {
         constexpr WidgetId kCloseBtn{ "closeBtn" };
+        constexpr WidgetId kPlayersBtn{ "playersBtn" };
         constexpr WidgetId kSendBtn{ "sendBtn" };
     }
 
@@ -45,11 +58,14 @@ namespace OpenLoco::Ui::Windows::Chat
         Widgets::Caption({ 1, 1 }, { 318, 13 }, Widgets::Caption::Style::whiteText, WindowColour::primary, StringIds::chat_title),
         Widgets::ImageButton(Widx::kCloseBtn, { 305, 2 }, { 13, 13 }, WindowColour::primary, ImageIds::close_button, StringIds::tooltip_close_window),
         Widgets::Panel({ 0, 15 }, { 320, 167 }, WindowColour::secondary),
-        Widgets::Button(Widx::kSendBtn, { 8, 153 }, { 304, 14 }, WindowColour::secondary, StringIds::chat_send_message)
+        Widgets::Button(Widx::kPlayersBtn, { 8, 153 }, { 70, 14 }, WindowColour::secondary, StringIds::chat_players_button),
+        Widgets::Button(Widx::kSendBtn, { 82, 153 }, { 230, 14 }, WindowColour::secondary, StringIds::chat_send_message)
 
     );
 
-    // Chat history, oldest message first. Capped to kMaxMessages entries.
+    // Chat history, oldest message first. Capped to kMaxMessages entries;
+    // draw() only shows the most recent kVisibleMessages of these (see
+    // kMaxMessages comment above).
     static std::deque<std::string> _history;
 
     static const WindowEventList& getEvents();
@@ -107,6 +123,10 @@ namespace OpenLoco::Ui::Windows::Chat
                 WindowManager::close(&self);
                 break;
 
+            case Widx::kPlayersBtn:
+                PlayerList::open();
+                break;
+
             case Widx::kSendBtn:
             {
                 auto args = FormatArguments::common();
@@ -135,10 +155,18 @@ namespace OpenLoco::Ui::Windows::Chat
 
         self.draw(drawingCtx);
 
+        // Only the most recent kVisibleMessages entries fit in the fixed-size
+        // panel; with kMaxMessages raised well above that, older history is
+        // still retained in _history (e.g. for a future real scrollback) but
+        // simply isn't drawn - the visible window always shows the tail end
+        // of the conversation, i.e. the newest messages, oldest-of-the-shown
+        // batch at the top and the newest at the bottom.
+        auto firstVisible = _history.size() > kVisibleMessages ? _history.size() - kVisibleMessages : 0;
+
         auto point = Point(self.x + 4, self.y + 20);
-        for (const auto& line : _history)
+        for (auto i = firstVisible; i < _history.size(); i++)
         {
-            tr.drawString(point, Colour::black, line.c_str());
+            tr.drawString(point, Colour::black, _history[i].c_str());
             point.y += kLineHeight;
         }
     }

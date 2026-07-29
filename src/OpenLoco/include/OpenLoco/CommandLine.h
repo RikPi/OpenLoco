@@ -51,6 +51,25 @@ namespace OpenLoco
         // client is assigned a real company. See NetworkClient's test-rename
         // hook and KNOWLEDGEBASE.md § Client round-trip test hook.
         std::optional<std::string> testRename{};
+        // Hidden headless test hook (deliberately omitted from --help): on
+        // the host, after <seconds> of server uptime and at least one
+        // client's join assignment resolved, programmatically reloads the
+        // same save the host was started with (the `host <path>` CLI path,
+        // via `options.path`) and requests a full resync of every client --
+        // the same effect as the file-browse-driven mid-session Load flow in
+        // Game::loadGame, without the dialog. See NetworkServer's
+        // test-host-load hook and KNOWLEDGEBASE.md § Host-driven mid-session
+        // load test hook.
+        std::optional<int32_t> testHostLoad{};
+        // Hidden headless test hook (deliberately omitted from --help): on
+        // the host, after <seconds> of server uptime, gracefully closes the
+        // server (sends ServerClosingPacket, tears down sockets) and keeps
+        // running as a single-player session afterwards -- exercises a
+        // client's reaction to a clean shutdown under --headless, which has
+        // no UI quit flow to trigger it otherwise. See NetworkServer's
+        // test-shutdown hook and KNOWLEDGEBASE.md § Graceful shutdown test
+        // hook.
+        std::optional<int32_t> testShutdownAfter{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

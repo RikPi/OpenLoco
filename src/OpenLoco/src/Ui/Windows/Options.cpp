@@ -2399,7 +2399,7 @@ namespace OpenLoco::Ui::Windows::Options
 
     namespace Misc
     {
-        static constexpr Ui::Size kWindowSize = { 420, 266 };
+        static constexpr Ui::Size kWindowSize = { 420, 302 };
 
         enum widx
         {
@@ -2413,6 +2413,9 @@ namespace OpenLoco::Ui::Windows::Options
             disable_vehicle_load_penalty,
             disableStationSizeLimit,
             trainsReverseAtSignals,
+
+            groupMultiplayer,
+            enableMultiplayer,
 
             groupSaveOptions,
             autosave_frequency_label,
@@ -2434,6 +2437,7 @@ namespace OpenLoco::Ui::Windows::Options
             constexpr WidgetId kDisableVehicleLoadPenalty{ "disable_vehicle_load_penalty" };
             constexpr WidgetId kDisableStationSizeLimit{ "disableStationSizeLimit" };
             constexpr WidgetId kTrainsReverseAtSignals{ "trainsReverseAtSignals" };
+            constexpr WidgetId kEnableMultiplayer{ "enableMultiplayer" };
             constexpr WidgetId kAutosaveFrequency{ "autosave_frequency" };
             constexpr WidgetId kAutosaveFrequencyBtn{ "autosave_frequency_btn" };
             constexpr WidgetId kAutosaveAmount{ "autosave_amount" };
@@ -2458,16 +2462,20 @@ namespace OpenLoco::Ui::Windows::Options
             Widgets::Checkbox(Widx::kDisableStationSizeLimit, { 10, 160 }, { 400, 12 }, WindowColour::secondary, StringIds::disableStationSizeLimitLabel, StringIds::disableStationSizeLimitTooltip),
             Widgets::Checkbox(Widx::kTrainsReverseAtSignals, { 10, 175 }, { 400, 12 }, WindowColour::secondary, StringIds::trainsReverseAtSignals),
 
+            // Multiplayer group
+            Widgets::GroupBox({ 4, 196 }, { 412, 32 }, WindowColour::secondary, StringIds::multiplayer_group_title),
+            Widgets::Checkbox(Widx::kEnableMultiplayer, { 10, 211 }, { 400, 12 }, WindowColour::secondary, StringIds::option_enable_multiplayer, StringIds::title_multiplayer_toggle_tooltip),
+
             // Save options group
-            Widgets::GroupBox({ 4, 196 }, { 412, 65 }, WindowColour::secondary, StringIds::autosave_preferences),
+            Widgets::GroupBox({ 4, 232 }, { 412, 65 }, WindowColour::secondary, StringIds::autosave_preferences),
 
-            Widgets::Label({ 10, 211 }, { 200, 12 }, WindowColour::secondary, ContentAlign::left, StringIds::autosave_frequency),
-            Widgets::dropdownWidgets(Widx::kAutosaveFrequency, Widx::kAutosaveFrequencyBtn, { 250, 211 }, { 156, 12 }, WindowColour::secondary, StringIds::empty),
+            Widgets::Label({ 10, 247 }, { 200, 12 }, WindowColour::secondary, ContentAlign::left, StringIds::autosave_frequency),
+            Widgets::dropdownWidgets(Widx::kAutosaveFrequency, Widx::kAutosaveFrequencyBtn, { 250, 247 }, { 156, 12 }, WindowColour::secondary, StringIds::empty),
 
-            Widgets::Label({ 10, 226 }, { 200, 12 }, WindowColour::secondary, ContentAlign::left, StringIds::autosave_amount),
-            Widgets::stepperWidgets(Widx::kAutosaveAmount, Widx::kAutosaveAmountDownBtn, Widx::kAutosaveAmountUpBtn, { 250, 226 }, { 156, 12 }, WindowColour::secondary, StringIds::empty),
+            Widgets::Label({ 10, 262 }, { 200, 12 }, WindowColour::secondary, ContentAlign::left, StringIds::autosave_amount),
+            Widgets::stepperWidgets(Widx::kAutosaveAmount, Widx::kAutosaveAmountDownBtn, Widx::kAutosaveAmountUpBtn, { 250, 262 }, { 156, 12 }, WindowColour::secondary, StringIds::empty),
 
-            Widgets::Checkbox(Widx::kExportPluginObjects, { 10, 241 }, { 400, 12 }, WindowColour::secondary, StringIds::export_plugin_objects, StringIds::export_plugin_objects_tip)
+            Widgets::Checkbox(Widx::kExportPluginObjects, { 10, 277 }, { 400, 12 }, WindowColour::secondary, StringIds::export_plugin_objects, StringIds::export_plugin_objects_tip)
 
         );
 
@@ -2477,6 +2485,7 @@ namespace OpenLoco::Ui::Windows::Options
         static void disableAICompaniesMouseUp(Window& self);
         static void disableTownExpansionMouseUp(Window& self);
         static void exportPluginObjectsMouseUp(Window& self);
+        static void enableMultiplayerMouseUp(Window& self);
 
         // 0x004C11B7
         static void prepareDraw(Window& self)
@@ -2518,6 +2527,11 @@ namespace OpenLoco::Ui::Windows::Options
             if (Config::get().townGrowthDisabled)
             {
                 self.activatedWidgets |= (1ULL << widx::disableTownExpansion);
+            }
+
+            if (Config::get().network.enabled)
+            {
+                self.activatedWidgets |= (1ULL << widx::enableMultiplayer);
             }
 
             if (Config::get().exportObjectsWithSaves)
@@ -2692,6 +2706,10 @@ namespace OpenLoco::Ui::Windows::Options
                     disableTownExpansionMouseUp(self);
                     break;
 
+                case Widx::kEnableMultiplayer:
+                    enableMultiplayerMouseUp(self);
+                    break;
+
                 case Widx::kExportPluginObjects:
                     exportPluginObjectsMouseUp(self);
                     break;
@@ -2772,6 +2790,20 @@ namespace OpenLoco::Ui::Windows::Options
             Config::write();
 
             self.invalidate();
+        }
+
+        static void enableMultiplayerMouseUp(Window& self)
+        {
+            auto& cfg = OpenLoco::Config::get();
+            cfg.network.enabled = !cfg.network.enabled;
+            Config::write();
+            self.invalidate();
+
+            // The title screen's multiplayer button is only shown/hidden on
+            // its own prepareDraw (see TitleMenu.cpp), so it needs an
+            // explicit invalidate to pick up the change immediately rather
+            // than waiting for some unrelated redraw.
+            WindowManager::invalidate(WindowType::titleMenu);
         }
 
         // 0x004C139C

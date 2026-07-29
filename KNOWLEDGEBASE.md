@@ -9,7 +9,7 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
 - Configure: `cmake --preset windows` (VS2022, `x64-windows-static` vcpkg).
   Build: `cmake --build --preset windows-release` (add `--target App` or
   `OpenLocoTests` for speed). Tests: `ctest -C Release` in `build\windows`
-  — currently 144/144.
+  — currently 145/145.
 - Never run two MSBuild invocations on the tree concurrently.
 - Game data is exe-relative (`data/objects` = OpenGraphics, fetched by
   CMake); run from `build\windows\Release`.
@@ -471,17 +471,273 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   `[ERR]`/desync lines. Names show as `Player #0`/`Player #1` (not garbage/blank) because
   the headless fixture's `preferredOwnerName`/connect name are empty and
   the fallback rule is working as designed, not because trimming failed.
-- `serverClosing` could not be exercised end-to-end headless: `--headless`
-  has no clean-quit trigger (`Network::close()` is only ever reached via UI
-  quit flows; see the now-narrowed "Graceful shutdown for `--headless`"
-  backlog item in `TASKS.md`) - verified by code review plus the fact the
-  build/tests/existing smoke test still pass. What *was* verified headless
-  is the deliberately-different hard-kill path: `Stop-Process` on the host
-  produces no `serverClosing` (expected - the process never runs its
-  destructor chain), and the client's pre-existing 15s connection-timeout
-  path still fires correctly (`Connection with server timed out` /
-  `Disconnected from server` in the client log, process stays alive
-  afterwards, no crash).
+- `serverClosing` could not be exercised end-to-end headless at the time
+  this was written: `--headless` had no clean-quit trigger (`Network::close()`
+  was only ever reached via UI quit flows) - verified by code review plus
+  the fact the build/tests/existing smoke test still pass. What *was*
+  verified headless is the deliberately-different hard-kill path:
+  `Stop-Process` on the host produces no `serverClosing` (expected - the
+  process never runs its destructor chain), and the client's pre-existing
+  15s connection-timeout path still fires correctly (`Connection with
+  server timed out` / `Disconnected from server` in the client log, process
+  stays alive afterwards, no crash). **Now exercised**: see §
+  Graceful shutdown test hook below.
+
+## Host-driven mid-session load test hook
+
+- `--test_host_load <seconds>` (`CommandLine.h`/`.cpp`): a hidden,
+  host-side test-only CLI option (deliberately absent from `printHelp`,
+  same pattern as `--test_rename`). Once the server has been up for
+  `<seconds>` AND at least one client's join assignment has resolved
+  (`Client::assignmentResolved`), it programmatically drives the exact
+  sequence `Game::loadGame`'s networked-host branch uses (see Game.cpp) —
+  `S5::importSaveToGameState(fs::u8path(getCommandLineOptions().path), ...)`
+  (the same fixture the host was started with, via the `host <path>` CLI
+  arg), then `SceneManager::requestScene(gameplay)`, then the facade
+  `Network::requestAllClientsResync()` — without needing the file-browse
+  dialog that path normally opens.
+- Lives in `NetworkServer` as `updateTestHostLoadHook()`, driven from
+  `onUpdate()` (the main-thread network tick, outside `GameScene::tick()`)
+  — mirroring how the client's `--test_rename` hook drives itself from its
+  own `onUpdate()`. `_testHostLoadDone` (bool) ensures it fires once.
+  `_startTime` (set in `listen()`) gives the uptime clock.
+- **Naming trap avoided**: inside a `NetworkServer` member function,
+  unqualified `requestAllClientsResync()` resolves to the *member*
+  `NetworkServer::requestAllClientsResync()` (ordinary C++ member-lookup
+  hides the free function of the same name in the enclosing
+  `OpenLoco::Network` namespace, regardless of visibility) — calling that
+  member directly would skip the facade's human-company-set reset
+  (`CompanyManager::clearHumanCompanies()` + `markCompanyAsHuman(host)` in
+  `Network.cpp`). The hook therefore calls the fully-qualified
+  `Network::requestAllClientsResync()` (resolves via the file's `using
+  namespace OpenLoco;` bringing the nested `Network` namespace into scope
+  for qualified lookup), exactly like `Game::loadGame` does.
+- Waiting for `assignmentResolved` (not just "a client connected") matters:
+  reloading before the join flow has resolved would prove nothing about
+  the resync path, and could race the initial `createPlayerCompany`
+  command.
+- `scripts\run_sync_smoke_test.ps1` gained `-TestHostLoad` (passes
+  `--test_host_load 20` to the host; asserts the client log contains `Host
+  loaded a new game` followed by a *second* `Assigned company \d+` line —
+  the fresh post-reload assignment, found by comparing `Select-String`
+  match `LineNumber`s — plus the standard zero-error assertion). Enforces
+  `-RunSeconds >= 50` (20s to fire + resync/reassignment time) and
+  `-JoinPolicy own`/`coop` (a spectator client never gets an `Assigned
+  company` line to check for a second one).
+- Verified headless (own policy, 55s run): host logs `[TEST] host reloaded
+  save` then `Requested resync from 1 client(s) after state reload`
+  (interestingly followed by `Scene transition: gameplay -> gameplay` — the
+  host re-enters the same scene id, which is a legitimate no-op transition,
+  not a bug); client logs `Host loaded a new game; resyncing`, then a fresh
+  `Assigned company 1` (the company id happened to come out the same as
+  before the reload — expected, since the reloaded fixture recreates the
+  same single competitor slot the host itself doesn't consume); zero
+  `[ERR]`/desync lines for the remainder of the run.
+
+## Graceful shutdown test hook
+
+- `--test_shutdown_after <seconds>` (`CommandLine.h`/`.cpp`): a hidden,
+  host-side test-only CLI option, same hidden-hook pattern as the two
+  above. Once the server has been up for `<seconds>`, it logs `[TEST]
+  closing server` and calls `close()`.
+- Lives in `NetworkServer` as `updateTestShutdownHook()`, also driven from
+  `onUpdate()`. `_testShutdownTriggered` (bool) ensures it fires once.
+- **Which `close()`, and why it's safe**: unqualified `close()` inside a
+  `NetworkServer` member function resolves to the *inherited*
+  `NetworkBase::close()` (member lookup again hides the free
+  `Network::close()` facade of the same name) — this is the
+  already-established pattern `NetworkClient::receiveServerClosingPacket`
+  uses to close itself from inside its own packet handler.
+  `NetworkBase::close()` only runs `onClose()` (which sends
+  `ServerClosingPacket` to every client and drops the networked scene
+  flags) and sets `_isClosed = true`; it does **not** destroy the
+  `NetworkServer` object. The owning `unique_ptr` (`Network.cpp`'s static
+  `_server`) is only reset by the facade `Network::tick()`, and only
+  *after* `update()`/`onUpdate()` returns — so there is no
+  self-destruction hazard in calling `close()` from inside `onUpdate()`.
+  The host process is never exited: once the networked/networkHost scene
+  flags are gone, it simply keeps simulating as single-player, which is
+  the intended behaviour (the hook tests the *client's* reaction, not host
+  teardown).
+- `scripts\run_sync_smoke_test.ps1` gained `-TestShutdown` (passes
+  `--test_shutdown_after 25` to the host; asserts the client log contains
+  `Server is shutting down` and does *not* contain `timed out`). No
+  standard assertion needed adjusting: neither process exits under this
+  hook (the host keeps running single-player; the client returns to title
+  but its process stays up), so the existing both-alive-at-end check
+  already holds. Enforces `-RunSeconds >= 35`.
+- Verified headless (own policy, 40s run): host logs `[TEST] closing
+  server` then `Server closed`; client logs `Server is shutting down` →
+  `Disconnected from server` → `Scene transition: gameplay -> title`; no
+  crash, no timeout message, zero `[ERR]`/desync lines.
+
+## Title sequence fixture
+
+- Exercising the graceful-shutdown hook's client-side reaction end-to-end
+  for the first time (previously only code-review-verified — see §
+  Graceful disconnect) surfaced a genuine headless-fixture gap:
+  `Title::loadTitle()` (`Title.cpp`) unconditionally reads
+  `Data/title.dat` from the Locomotion install path whenever the title
+  scene is entered, and the stub `fake-locomotion` install dir only ever
+  shipped `Data\g1.DAT`. Without it, the client crashed outright (an
+  uncaught `Exception::RuntimeError` thrown by `FileStream`'s constructor
+  when the read-mode `fopen` fails — this happens *before*
+  `S5::importSaveToGameState(Stream&, flags)`'s own try/catch even starts,
+  since it's thrown one call frame earlier, in the `(const fs::path&,
+  flags)` overload). Side note, not fixed (unrelated file, out of scope):
+  `FileStream`'s failure message is hard-coded to say "for writing" even
+  when the failing open was for reading.
+- Fixed test-fixture-only (no production code touched): the smoke script
+  now copies its `gensave` fixture to `Data\title.dat` under
+  `$LocomotionPath` every run (harmless for runs that never reach title).
+  A plain copy isn't enough, though — `importSaveToGameState` additionally
+  requires the S5 `Header`'s `isTitleSequence` bit
+  (`S5::HeaderFlags::isTitleSequence`, gated behind the
+  `DO_TITLE_SEQUENCE_CHECKS` macro, unconditionally `#define`d at the top
+  of `S5.cpp`) to be set, and rejects the file ("File was not a title
+  sequence") otherwise; no `S5::SaveFlags` option sets that bit on export,
+  so a plain fixture always fails it as-is.
+- `run_sync_smoke_test.ps1`'s `Set-TitleSequenceFlag` patches that single
+  bit into an existing S5 file in place, then recomputes the file
+  checksum — mirroring the reverse-engineered byte-patch approach already
+  used for the Competitor object fixture (`gen_competitor_object.py`).
+  Byte layout, reverse-engineered from `S5.cpp`/`SawyerStream.cpp` and
+  checksum-verified against a real `gensave` fixture before trusting it
+  (decoding chunk-relative byte 1 yielded exactly `HeaderFlags::
+  hasSaveDetails` (8), and bytes 4-7 decoded to the exact `kCurrentVersion`
+  constant `0x62262`):
+  - The first chunk in any S5 file is always the 32-byte `Header`
+    (`S5.h`), written by `exportGameState` as `[encoding u8][length u32
+    LE][encoded payload]` with `encoding = SawyerEncoding::rotate` (3, the
+    file's very first byte).
+  - `SawyerStreamWriter::encodeRotate` applies a per-byte `std::rotl(byte,
+    code)` with `code` cycling `1, 3, 5, 7, ...` (`code_i = (1 + 2*i) mod
+    8`, restarting at 1 for each chunk); `SawyerStreamReader::decodeRotate`
+    inverts it with `std::rotr(byte, code)` using the *same* code
+    sequence — easy to misread as symmetric (both named "rotate", the
+    reader's own source even calls `std::rotr` too — it's the *writer*
+    that uses `rotl`, confirmed by reading `SawyerStreamWriter::
+    encodeRotate` specifically, not just grepping "rotate" and finding the
+    reader function first, which is the mistake that produced a garbage
+    decode of the version field on the first attempt here).
+  - `Header::flags` (`HeaderFlags`) is the chunk's byte index 1, so `code
+    = 3` there; patch = decode with `rotr(_, 3)`, OR in `0x04`
+    (`isTitleSequence`), re-encode with `rotl(_, 3)`.
+  - The whole file's trailing 4 bytes are a checksum: a plain additive sum
+    of every other byte (`SawyerStreamWriter::write`/`writeChecksum`), not
+    a rotate/CRC — trivial to recompute after any in-place byte edit.
+  - No SaveFlags option needs to change and no other chunk shifts, since
+    the rotate cipher is byte-length-preserving and only one byte's
+    plaintext changes.
+
+## Options multiplayer checkbox, config-driven host bind/port, chat polish
+
+- "Enable multiplayer" checkbox: `Ui/Windows/Options.cpp`, Miscellaneous tab
+  (`namespace Misc`). A new "Multiplayer" group box was inserted between the
+  existing "Vehicle behaviour" and "Save options" groups (window height grew
+  266 -> 302; every widget below the insertion point - the save-options
+  group box, its two dropdown/stepper rows, and the export-plugin-objects
+  checkbox - had to shift down by the same 36px, since widget positions
+  here are absolute, not flow-laid-out). Widget-array order must exactly
+  match the `enum widx` declaration order (positional `WidgetIndex_t`) -
+  the new `groupMultiplayer`/`enableMultiplayer` enum values and their
+  `Widgets::GroupBox`/`Widgets::Checkbox` entries were inserted at the same
+  relative position in both places. Bound to `Config::get().network.enabled`
+  + `Config::write()` in a new `enableMultiplayerMouseUp()`, following the
+  exact shape of every other checkbox handler in this tab (e.g.
+  `disableTownExpansionMouseUp`). Toggling also calls
+  `WindowManager::invalidate(WindowType::titleMenu)` - required because the
+  title screen's multiplayer button's `hidden` flag is only recomputed in
+  `TitleMenu.cpp`'s own `prepareDraw` (gated on this same
+  `config.network.enabled`, see line ~189), which only reruns on that
+  window's own update/redraw cycle; an explicit invalidate is the
+  established way other cross-window config toggles in this file already
+  handle this (c.f. `enableCheatsToolbarButtonMouseUp` invalidating
+  `WindowType::topToolbar`).
+- Localisation choice for the checkbox: this branch's language files are
+  `data/language/*.yml`, keyed by numeric string id under a top-level
+  `strings:` map; `StringIds.h` gives each id a C++ name.
+  `Localisation::loadLanguageFile()` (`LanguageFiles.cpp`) always loads
+  `en-GB.yml` first as the fallback table, then overlays the selected
+  language's file on top of it (`swapString` only touches ids present in
+  that second file) - so any id missing from a non-English file simply
+  falls back to its English text, never a crash or blank. This branch's
+  existing chat window (`chat_title`/`chat_send_message`/`chat_instructions`
+  = ids 1716-1718) had already established the preferred pattern here:
+  reuse a vanilla string id whose *original, already-translated-into-all-
+  17-languages* meaning already matches the new use, rather than adding a
+  new one. Applying that same search here found id 1466 ("Two Player Game"
+  in en-GB; already translated in every shipped language, e.g. nl-NL
+  already literally says "Multiplayer") - a vanilla two-player-setup-dialog
+  title string that is completely dead code on this branch (grepped: no
+  `StringIds::` name existed for it, and no raw `1466` literal appears
+  anywhere in `src/`). It was named `StringIds::multiplayer_group_title`
+  and reused as the new group box's title, with zero yml changes. No
+  similarly-fitting existing id existed for the checkbox's own label
+  wording ("Enable multiplayer" as an actual clickable action, not a
+  section title), so one new string was appended en-GB-only:
+  `StringIds::option_enable_multiplayer` = 2458 (the next free id after the
+  existing table's max, 2457). The tooltip reuses
+  `StringIds::title_multiplayer_toggle_tooltip` (1567, "Toggle between
+  single player and two player mode") unchanged - already the exact tooltip
+  on the TitleMenu's own multiplayer toggle button, so the wording already
+  fits describing this checkbox too.
+- Host bind/port via config: `Config::Network` (`Config.h`) gained
+  `std::string bind` and `uint16_t port{ 11754 }`, read/written under
+  `network.bind`/`network.port` in `Config.cpp` (same read/write shape as
+  the pre-existing `network.enabled`). `Network::openServer()`
+  (`Network.cpp`) now resolves bind/port as: CLI `--bind` if non-empty,
+  else `Config::get().network.bind`; CLI `--port` if present
+  (`std::optional`), else the config port (falling back to
+  `Network::kDefaultPort` only in the defensive case config port is 0,
+  which config normally never produces given its `11754` default). CLI
+  behaviour is byte-for-byte unchanged (headless test hosts and the smoke
+  test always pass explicit `--bind`/`--port`-equivalent defaults through
+  the CLI path, so neither fallback branch is ever exercised there - this
+  is a pure addition for the previously-dead "UI hosts with no CLI args"
+  case). No UI was added to edit these two config fields directly (out of
+  scope for this pass - a host-setup dialog can read/write them going
+  forward); `Config.h`'s own comment block ("int32_t used for all numeric
+  config variables for easier yaml-cpp serialisation") was deliberately not
+  followed for `port` since the task specified `uint16_t` and yaml-cpp's
+  generic stream-based `convert<T>` already handles it fine with no new
+  `ConfigConvert.hpp` specialisation needed (verified by a clean build).
+- Chat window history/scrolling: `Ui/Windows/Chat.cpp`'s storage cap
+  (`kMaxMessages`) raised from 12 to 100; a separate `kVisibleMessages = 12`
+  keeps the same number of lines actually drawn (the window has no
+  scrollbar/viewport widget - a real `ScrollView` would need that machinery
+  added and was judged out of scope for this pass, noted as a follow-up).
+  `draw()` was changed from iterating the whole (previously <=12-entry)
+  deque to iterating only `_history[_history.size() - kVisibleMessages ..]`
+  (clamped to 0 when there are fewer than `kVisibleMessages` total), so the
+  window always shows the most recent messages, bottom-anchored in time
+  (oldest-of-the-shown-batch at the top, newest at the bottom) - "simplest
+  acceptable" per the task, rather than a full scrollback viewer.
+- Chat "Players" button: added `Widx::kPlayersBtn`
+  (`Widgets::Button`, 8,153 / 70x14) that calls `PlayerList::open()`
+  (already declared in the same `OpenLoco::Ui::Windows` block Chat.cpp's
+  `WindowManager.h` include brings in - no new include needed), giving the
+  roster window a second reachable trigger besides the existing "opens
+  alongside Chat" hook in `TimePanel::beginSendChatMessage`. The Send button
+  was narrowed from the former full-width 304x14 to 230x14 (position moved
+  from x=8 to x=82) to make room on the same row rather than growing the
+  window. New string `StringIds::chat_players_button` = 2459 ("Players",
+  en-GB.yml only) - same fallback reasoning as `option_enable_multiplayer`
+  above; no existing string fit this exact label.
+- Verification limitation, honestly noted: all three of the above are
+  windowed-UI features (Options checkbox, config-driven host dialog path,
+  Chat window rendering/buttons) with no headless test hook - unlike the
+  CLI-hook-driven features elsewhere in this file, there was no way to
+  exercise the checkbox click, the config-driven bind/port fallback branch,
+  or the Chat draw/button-click paths end-to-end under `--headless`
+  (which skips window creation entirely). Verification for these three
+  items is therefore build-clean + code-review + the standard regression
+  battery (full `windows-release` build of `App` and `OpenLocoTests`, full
+  `ctest -C Release` 145/145, `scripts\run_sync_smoke_test.ps1 -TestRename`
+  own-policy PASS) rather than a targeted runtime check of the new UI
+  itself. The `network.enabled`/join-policy runtime behaviour these UI
+  pieces read and write was already headless-verified by the pre-existing
+  smoke test machinery, and is unchanged by this pass.
 
 ## Session / environment
 

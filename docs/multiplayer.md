@@ -92,6 +92,39 @@ Join flow: connect → version check → snapshot (existing) → server issues
 `createPlayerCompany` command (or co-op/spectator assignment) → assignment
 packet tells the client its company id → client sets local controlling id.
 
+## Reconnect (design — next up)
+
+Goal: a client that loses its connection can rejoin the same session and
+reclaim its company, instead of being treated as a brand-new player.
+
+- **Session token.** On first accept, the server generates a random token
+  per client and sends it alongside the company assignment. The client
+  keeps it in memory for the lifetime of the process.
+- **Reclaim on connect.** `ConnectPacket` grows a token field (zeroed =
+  fresh join; requires a network version bump). If the token matches a
+  reserved seat, the server re-attaches the client to its previous company
+  (no `createPlayerCompany`, no join policy) and the normal snapshot
+  transfer + assignment re-send flow follows — the same machinery a desync
+  resync already uses.
+- **Seat reservation.** On timeout/disconnect the server moves the client
+  entry to a reserved list (token, name, company) instead of dropping it.
+  V1 keeps seats reserved for the session's lifetime; an expiry policy
+  (seat becomes joinable/AI after N minutes) can come later. The roster
+  shows reserved seats as "(disconnected)".
+- **Client auto-retry.** V1: when an established connection times out, the
+  client automatically attempts to rejoin the same endpoint with its token
+  a few times (backoff), surfacing progress in the status window, before
+  giving up and returning to title. UI-initiated manual reconnect can come
+  later.
+- **Determinism note.** Reconnection is pure session bookkeeping: no game
+  state changes on either path (the company simply keeps existing and,
+  while its seat is empty, its commands are absent — identical on every
+  peer). Only the human-company mask must NOT be cleared on disconnect,
+  which is already the case.
+
+Host migration is out of scope for this design; a dead host still ends the
+session.
+
 ## Test strategy
 
 - `CommandSerializationTests` cover the wire codecs.

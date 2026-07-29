@@ -1202,6 +1202,14 @@ namespace OpenLoco::StringIds
     constexpr StringId stringid_local_authority_wont_allow_removal_in_use = 1464;
     constexpr StringId tooltip_select_company = 1465;
 
+    // Vanilla's dead "Two Player Game" setup-dialog title string (id 1466,
+    // "Two Player Game" in en-GB - already translated in every shipped
+    // language file, e.g. nl-NL already renders it as "Multiplayer") was
+    // unused by any code on this branch; repurposed as the Options
+    // "Multiplayer" group box title instead of adding a brand new string
+    // (see KNOWLEDGEBASE.md § Options multiplayer checkbox).
+    constexpr StringId multiplayer_group_title = 1466;
+
     constexpr StringId enter_host_address = 1483;
     constexpr StringId enter_host_address_description = 1484;
 
@@ -2171,6 +2179,16 @@ namespace OpenLoco::StringIds
     constexpr StringId options_open_jukebox = 2455;
     constexpr StringId cargo_awaiting_processing = 2456;
     constexpr StringId cargo_awaiting_transport = 2457;
+
+    // New string (no suitable existing id to reuse for this exact checkbox
+    // label wording); appended en-GB.yml only, following this repo's
+    // pattern of new UI text not automatically getting non-English
+    // translations (see KNOWLEDGEBASE.md § Options multiplayer checkbox).
+    constexpr StringId option_enable_multiplayer = 2458;
+    // New string: label for the Chat window's "Players" button (opens the
+    // roster window). Same en-GB-only pattern as option_enable_multiplayer
+    // above.
+    constexpr StringId chat_players_button = 2459;
 
     constexpr StringId temporary_object_load_str_0 = 8192;
     constexpr StringId temporary_object_load_str_1 = 8193;

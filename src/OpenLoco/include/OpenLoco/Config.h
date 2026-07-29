@@ -140,6 +140,13 @@ namespace OpenLoco::Config
         // Multiplayer UI is enabled by default on this branch (upstream
         // defaults to hidden while multiplayer is a work in progress)
         bool enabled{ true };
+
+        // UI-initiated hosting defaults (Network::openServer falls back to
+        // these when the CLI --bind/--port options are not supplied; CLI
+        // always wins when present). An empty bind means "any interface",
+        // matching the CLI's own default.
+        std::string bind;
+        uint16_t port{ 11754 };
     };
 
     constexpr auto kMessageCriticalityCount = 6;

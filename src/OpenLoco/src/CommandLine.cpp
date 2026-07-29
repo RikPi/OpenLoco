@@ -310,8 +310,10 @@ namespace OpenLoco
                           .registerOption("--seed", 1)
                           .registerOption("--headless")
                           .registerOption("--join_policy", 1)
-                          // Hidden test hook, intentionally not in printHelp/--help.
-                          .registerOption("--test_rename", 1);
+                          // Hidden test hooks, intentionally not in printHelp/--help.
+                          .registerOption("--test_rename", 1)
+                          .registerOption("--test_host_load", 1)
+                          .registerOption("--test_shutdown_after", 1);
 
         if (!parser.parse())
         {
@@ -437,6 +439,16 @@ namespace OpenLoco
         if (parser.hasOption("--test_rename"))
         {
             options.testRename = std::string(parser.getArg("--test_rename"));
+        }
+
+        if (parser.hasOption("--test_host_load"))
+        {
+            options.testHostLoad = parser.getArg<int32_t>("--test_host_load");
+        }
+
+        if (parser.hasOption("--test_shutdown_after"))
+        {
+            options.testShutdownAfter = parser.getArg<int32_t>("--test_shutdown_after");
         }
 
         return options;

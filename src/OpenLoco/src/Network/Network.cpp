@@ -1,5 +1,6 @@
 #include "Network/Network.h"
 #include "CommandLine.h"
+#include "Config.h"
 #include "Environment.h"
 #include "GameCommands/CommandSerialization.h"
 #include "GameCommands/GameCommands.h"
@@ -172,9 +173,13 @@ namespace OpenLoco::Network
 
         try
         {
+            // CLI --bind/--port win when supplied (unchanged CLI behaviour);
+            // otherwise fall back to the config values so UI-initiated
+            // hosting isn't stuck with the CLI-only defaults.
             const auto& cmdlineOptions = getCommandLineOptions();
-            auto& bind = cmdlineOptions.bind;
-            auto port = cmdlineOptions.port.value_or(kDefaultPort);
+            const auto& networkConfig = Config::get().network;
+            const auto& bind = !cmdlineOptions.bind.empty() ? cmdlineOptions.bind : networkConfig.bind;
+            auto port = cmdlineOptions.port.value_or(networkConfig.port != 0 ? networkConfig.port : kDefaultPort);
 
             _server = std::make_unique<NetworkServer>();
             _server->listen(bind, port);

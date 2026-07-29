@@ -63,6 +63,32 @@ namespace OpenLoco::Network
         uint32_t _gameCommandIndex{};
         std::queue<ServerQueuedGameCommand> _gameCommands;
 
+        // Timestamp (Platform::getTime(), ms) the server started listening.
+        // Used by the headless test hooks below to measure uptime.
+        uint32_t _startTime{};
+
+        // Headless test hook (--test_host_load <seconds>, CommandLine.h):
+        // once the server has been up for <seconds> and at least one client
+        // has a resolved join assignment, reloads the same save the host was
+        // started with and resyncs every client -- the programmatic
+        // equivalent of the file-browse-driven mid-session Load flow in
+        // Game::loadGame. Driven from onUpdate() (main-thread loop, outside
+        // GameScene::tick()), never from inside the deterministic tick
+        // section. See KNOWLEDGEBASE.md § Host-driven mid-session load test
+        // hook.
+        bool _testHostLoadDone{};
+        void updateTestHostLoadHook();
+
+        // Headless test hook (--test_shutdown_after <seconds>,
+        // CommandLine.h): once the server has been up for <seconds>,
+        // gracefully closes it (ServerClosingPacket to every client, sockets
+        // torn down) and keeps running as single-player -- exercises a
+        // client's reaction to a clean shutdown under --headless, which has
+        // no UI quit flow to trigger it otherwise. Also driven from
+        // onUpdate(). See KNOWLEDGEBASE.md § Graceful shutdown test hook.
+        bool _testShutdownTriggered{};
+        void updateTestShutdownHook();
+
         Client* findClient(const INetworkEndpoint& endpoint);
         Client* findClient(client_id_t id);
         void createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet);
