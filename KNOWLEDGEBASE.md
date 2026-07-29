@@ -34,7 +34,9 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   → start client (`--headless join 127.0.0.1`) → wait → check
   `%APPDATA%\OpenLoco\logs\openloco_*.log`. Success = exactly one
   `Accepted new client`, client `Scene transition: boot -> gameplay`, zero
-  `[ERR]`/desync lines. With the competitor fixture installed (see below),
+  `[ERR]`/desync lines. Scripted with assertions + exit code:
+  `scripts\run_sync_smoke_test.ps1 [-JoinPolicy own|coop|spectator]
+  [-RunSeconds N] [-Seed N]`. With the competitor fixture installed (see below),
   also expect host `Assigned company N to client '...'` and client
   `Assigned company N` — the join-time `createPlayerCompany` success path.
 - stdout is fully buffered and LOST when the process is killed — use the

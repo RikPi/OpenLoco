@@ -46,8 +46,12 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 
 ## Backlog
 
-- [ ] CI job: gensave → headless host+join → assert no desync (script the
-      proven smoke test)
+- [x] Scripted smoke test: `scripts/run_sync_smoke_test.ps1` (gensave →
+      headless host+join → asserts accept count, assignment outcome,
+      gameplay transition, zero error/desync lines; exit code 0/1).
+      Verified for `own` and `spectator` policies.
+- [ ] Wire the smoke test into a CI workflow job (fork CI; needs the stub
+      install dir + competitor fixture generated in the job)
 - [ ] Fixture where the host owns a company (gensave option to create the
       player company at generation time?) — exercises the coop join policy
       success path and in-game command flow from a client
