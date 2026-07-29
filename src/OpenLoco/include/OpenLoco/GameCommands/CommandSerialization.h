@@ -1,8 +1,10 @@
 #pragma once
 
 #include "GameCommands/GameCommands.h"
+#include "World/Company.h"
 #include <OpenLoco/Core/Stream.hpp>
 #include <OpenLoco/Engine/World.hpp>
+#include <array>
 #include <cstdint>
 #include <type_traits>
 
@@ -27,6 +29,23 @@ namespace OpenLoco::GameCommands
      * yet fall back to serializing the raw `registers` blob (interoperable
      * only between identical builds).
      */
+
+    // Detects std::array<T, N> specializations so the writer/reader can loop
+    // over fixed-size arrays of otherwise-serializable element types (e.g.
+    // std::array<ColourScheme, 4> in VehicleRepaintArgs) without a dedicated
+    // branch per array field.
+    template<typename T>
+    struct IsStdArray : std::false_type
+    {
+    };
+
+    template<typename T, std::size_t N>
+    struct IsStdArray<std::array<T, N>> : std::true_type
+    {
+    };
+
+    template<typename T>
+    inline constexpr bool IsStdArrayV = IsStdArray<T>::value;
 
     class ArgsWriter
     {
@@ -72,6 +91,38 @@ namespace OpenLoco::GameCommands
             else if constexpr (std::is_bounded_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>)
             {
                 _stream.write(value, sizeof(T));
+            }
+            else if constexpr (std::is_same_v<T, ObjectHeader>)
+            {
+                // Explicit field-by-field layout (not a memcpy of the packed
+                // struct): flags as a plain u32, name as 8 raw bytes,
+                // checksum as a plain u32. Portable regardless of host
+                // struct packing/endianness.
+                writeInt(value.flags);
+                _stream.write(value.name, sizeof(value.name));
+                writeInt(value.checksum);
+            }
+            else if constexpr (std::is_same_v<T, OwnerStatus>)
+            {
+                // OwnerStatus is just two int16_t "registers" (data[0]/[1]);
+                // the entity-id/position interpretation is derived from
+                // their values, not stored separately, so serializing the
+                // raw pair is both sufficient and exactly what the
+                // int16_t-pair constructor round-trips through.
+                writeInt(value.data[0]);
+                writeInt(value.data[1]);
+            }
+            else if constexpr (std::is_same_v<T, ColourScheme>)
+            {
+                write(value.primary);
+                write(value.secondary);
+            }
+            else if constexpr (IsStdArrayV<T>)
+            {
+                for (auto& element : value)
+                {
+                    write(element);
+                }
             }
             else
             {
@@ -138,6 +189,29 @@ namespace OpenLoco::GameCommands
             else if constexpr (std::is_bounded_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>)
             {
                 _stream.read(value, sizeof(T));
+            }
+            else if constexpr (std::is_same_v<T, ObjectHeader>)
+            {
+                value.flags = readInt<uint32_t>();
+                _stream.read(value.name, sizeof(value.name));
+                value.checksum = readInt<uint32_t>();
+            }
+            else if constexpr (std::is_same_v<T, OwnerStatus>)
+            {
+                value.data[0] = readInt<int16_t>();
+                value.data[1] = readInt<int16_t>();
+            }
+            else if constexpr (std::is_same_v<T, ColourScheme>)
+            {
+                read(value.primary);
+                read(value.secondary);
+            }
+            else if constexpr (IsStdArrayV<T>)
+            {
+                for (auto& element : value)
+                {
+                    read(element);
+                }
             }
             else
             {

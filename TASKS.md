@@ -522,8 +522,22 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       blank padding in "Accepted new client"/assignment messages) — done as
       part of the player roster work (`Network::resolveDisplayName`); see
       Milestone 2.
-- [ ] Typed serialization for the 3 complex-type commands
-      (`changeCompanyFace`, `updateOwnerStatus`, `vehicleRepaint`)
+- [x] Typed serialization for the 3 complex-type commands
+      (`changeCompanyFace`, `updateOwnerStatus`, `vehicleRepaint`) — typed
+      coverage now 79/85 (70 generic + 6 rename-chunk + these 3); 6 raw-
+      fallback stubs remain (`loadMultiplayerMap`, `gc_unk_34`, `gc_unk_68`,
+      `gc_unk_70`, `sendChatMessage`, `multiplayerSave`). All 3 verified
+      symmetric (`Args(registers(X)) == X`, unlike the renames) so all use
+      the plain generic `makeTypedCodec<T>`; see KNOWLEDGEBASE.md § Complex-
+      type typed serialization for the per-command reasoning and the
+      archive extensions (explicit `ObjectHeader` branch, explicit
+      `OwnerStatus` branch, generic `std::array<T, N>` branch + a small
+      `ColourScheme` branch). Added 7 new tests (2 archive-level + 5 typed
+      round-trip) to `CommandSerializationTests.cpp`; re-pointed the
+      generic `rawFallbackRoundTrip` test at `sendChatMessage` since
+      `changeCompanyFace` is no longer on the fallback path. Verified: full
+      clean build, ctest 152/152 (was 145), `-TestRename` smoke test PASS
+      (regression).
 - [x] Player names in chat (needs client→name registry at Network layer) —
       done as part of the player roster work: `Network::receiveChatMessage`
       resolves the sender's display name via `Network::getPlayerRoster()`,

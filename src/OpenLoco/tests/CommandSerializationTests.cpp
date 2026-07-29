@@ -1,6 +1,10 @@
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/GameCommands/CommandSerialization.h>
+#include <OpenLoco/GameCommands/Company/ChangeCompanyFace.h>
+#include <OpenLoco/GameCommands/Company/UpdateOwnerStatus.h>
 #include <OpenLoco/GameCommands/Terraform/RaiseLand.h>
+#include <OpenLoco/GameCommands/Vehicles/VehicleRepaint.h>
+#include <OpenLoco/Graphics/Colour.h>
 #include <OpenLoco/Network/Packet.h>
 #include <gtest/gtest.h>
 
@@ -55,8 +59,12 @@ TEST(CommandSerializationTests, typedRoundTripRaiseLand)
 
 TEST(CommandSerializationTests, rawFallbackRoundTrip)
 {
-    // changeCompanyFace carries an ObjectHeader and stays on the raw fallback
-    constexpr auto kRawCommand = GameCommand::changeCompanyFace;
+    // sendChatMessage is one of the 6 remaining stub commands (packet-level
+    // chat by design, never queued as a game command in practice) and has
+    // no typed serializer, so it stays on the raw registers fallback.
+    // changeCompanyFace/updateOwnerStatus/vehicleRepaint used to be the
+    // examples here but are now typed - see typedRoundTrip* tests below.
+    constexpr auto kRawCommand = GameCommand::sendChatMessage;
 
     registers original;
     original.eax = 0x11223344;
@@ -189,4 +197,186 @@ TEST(CommandSerializationTests, malformedPacketIsRejected)
 
     Network::QueuedGameCommand decoded;
     EXPECT_FALSE(Network::fromWirePacket(packet, decoded));
+}
+
+// ---------------------------------------------------------------------
+// Archive-level tests for the ObjectHeader / std::array<T,N> branches
+// added for the 3 newly-migrated commands.
+// ---------------------------------------------------------------------
+
+TEST(CommandSerializationTests, objectHeaderFieldRoundTrip)
+{
+    MemoryStream ms;
+    ArgsWriter writer(ms);
+    // Edge bytes deliberately included in name: embedded NUL and 0xFF.
+    ObjectHeader header{ 0xAABBCCDDu, { 'C', 'O', 'M', '\0', 'P', '0', '1', '\xFF' }, 0x11223344u };
+    writer(header);
+
+    // flags (4) + name (8, raw bytes) + checksum (4)
+    ASSERT_EQ(ms.getLength(), 16u);
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ms.data());
+    // flags little-endian
+    EXPECT_EQ(bytes[0], 0xDD);
+    EXPECT_EQ(bytes[1], 0xCC);
+    EXPECT_EQ(bytes[2], 0xBB);
+    EXPECT_EQ(bytes[3], 0xAA);
+    // name is raw bytes, no transformation
+    EXPECT_EQ(0, std::memcmp(bytes + 4, header.name, sizeof(header.name)));
+    // checksum little-endian
+    EXPECT_EQ(bytes[12], 0x44);
+    EXPECT_EQ(bytes[13], 0x33);
+    EXPECT_EQ(bytes[14], 0x22);
+    EXPECT_EQ(bytes[15], 0x11);
+
+    ms.setPosition(0);
+    ArgsReader reader(ms);
+    ObjectHeader decoded{};
+    reader(decoded);
+
+    EXPECT_EQ(decoded.flags, header.flags);
+    EXPECT_EQ(0, std::memcmp(decoded.name, header.name, sizeof(header.name)));
+    EXPECT_EQ(decoded.checksum, header.checksum);
+}
+
+TEST(CommandSerializationTests, colourSchemeArrayRoundTrip)
+{
+    MemoryStream ms;
+    ArgsWriter writer(ms);
+    std::array<ColourScheme, 4> colours{
+        ColourScheme(Colour::red, Colour::blue),
+        ColourScheme(Colour::black, Colour::white),
+        ColourScheme(Colour::green, Colour::pink),
+        ColourScheme(Colour::mutedRed, Colour::grey),
+    };
+    writer(colours);
+
+    // Each ColourScheme is 2 bytes (primary + secondary, each a 1-byte enum)
+    ASSERT_EQ(ms.getLength(), 8u);
+
+    ms.setPosition(0);
+    ArgsReader reader(ms);
+    std::array<ColourScheme, 4> decoded{};
+    reader(decoded);
+
+    for (size_t i = 0; i < colours.size(); i++)
+    {
+        EXPECT_EQ(decoded[i].primary, colours[i].primary);
+        EXPECT_EQ(decoded[i].secondary, colours[i].secondary);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Typed round-trip tests for the 3 newly-migrated commands.
+// ---------------------------------------------------------------------
+
+TEST(CommandSerializationTests, typedRoundTripChangeCompanyFace)
+{
+    ChangeCompanyFaceArgs original;
+    original.companyId = CompanyId::null; // edge value: 0xFF
+    original.objHeader = ObjectHeader{ 0xFFFFFFFFu, { 'C', 'O', 'M', 'P', '\0', 'E', 'T', '1' }, 0x00000000u };
+
+    auto regs = static_cast<registers>(original);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::changeCompanyFace, regs, ms));
+    EXPECT_LT(ms.getLength(), sizeof(registers));
+
+    ms.setPosition(0);
+    registers decodedRegs;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::changeCompanyFace, ms, decodedRegs));
+
+    ChangeCompanyFaceArgs decoded(decodedRegs);
+    EXPECT_EQ(decoded.companyId, original.companyId);
+    EXPECT_EQ(decoded.objHeader.flags, original.objHeader.flags);
+    EXPECT_EQ(0, std::memcmp(decoded.objHeader.name, original.objHeader.name, sizeof(original.objHeader.name)));
+    EXPECT_EQ(decoded.objHeader.checksum, original.objHeader.checksum);
+}
+
+TEST(CommandSerializationTests, typedRoundTripUpdateOwnerStatusEntity)
+{
+    UpdateOwnerStatusArgs original;
+    original.ownerStatus = OwnerStatus(EntityId(4321));
+
+    auto regs = static_cast<registers>(original);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::updateOwnerStatus, regs, ms));
+
+    ms.setPosition(0);
+    registers decodedRegs;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::updateOwnerStatus, ms, decodedRegs));
+
+    UpdateOwnerStatusArgs decoded(decodedRegs);
+    EXPECT_TRUE(decoded.ownerStatus.isEntity());
+    EXPECT_EQ(decoded.ownerStatus.getEntity(), original.ownerStatus.getEntity());
+}
+
+TEST(CommandSerializationTests, typedRoundTripUpdateOwnerStatusPosition)
+{
+    UpdateOwnerStatusArgs original;
+    // Negative coordinates as an edge case - OwnerStatus stores raw int16s.
+    original.ownerStatus = OwnerStatus(World::Pos2(-320, 12480));
+
+    auto regs = static_cast<registers>(original);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::updateOwnerStatus, regs, ms));
+
+    ms.setPosition(0);
+    registers decodedRegs;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::updateOwnerStatus, ms, decodedRegs));
+
+    UpdateOwnerStatusArgs decoded(decodedRegs);
+    EXPECT_FALSE(decoded.ownerStatus.isEntity());
+    EXPECT_FALSE(decoded.ownerStatus.isEmpty());
+    EXPECT_EQ(decoded.ownerStatus.getPosition(), original.ownerStatus.getPosition());
+}
+
+TEST(CommandSerializationTests, typedRoundTripUpdateOwnerStatusEmpty)
+{
+    UpdateOwnerStatusArgs original; // default ctor: OwnerStatus() -> {-1, 0}, isEmpty()
+
+    auto regs = static_cast<registers>(original);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::updateOwnerStatus, regs, ms));
+
+    ms.setPosition(0);
+    registers decodedRegs;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::updateOwnerStatus, ms, decodedRegs));
+
+    UpdateOwnerStatusArgs decoded(decodedRegs);
+    EXPECT_TRUE(decoded.ownerStatus.isEmpty());
+}
+
+TEST(CommandSerializationTests, typedRoundTripVehicleRepaint)
+{
+    VehicleRepaintArgs original;
+    original.head = EntityId(777);
+    original.colours = {
+        ColourScheme(Colour::red, Colour::blue),
+        ColourScheme(Colour::black, Colour::pink),
+        ColourScheme(Colour::green, Colour::mutedRed),
+        ColourScheme(Colour::white, Colour::grey),
+    };
+    original.paintFlags = VehicleRepaintFlags::paintFromVehicleUi;
+
+    auto regs = static_cast<registers>(original);
+
+    MemoryStream ms;
+    ASSERT_TRUE(encodeCommandArgs(GameCommand::vehicleRepaint, regs, ms));
+    EXPECT_LT(ms.getLength(), sizeof(registers));
+
+    ms.setPosition(0);
+    registers decodedRegs;
+    ASSERT_TRUE(decodeCommandArgs(GameCommand::vehicleRepaint, ms, decodedRegs));
+
+    VehicleRepaintArgs decoded(decodedRegs);
+    EXPECT_EQ(decoded.head, original.head);
+    for (size_t i = 0; i < original.colours.size(); i++)
+    {
+        EXPECT_EQ(decoded.colours[i].primary, original.colours[i].primary);
+        EXPECT_EQ(decoded.colours[i].secondary, original.colours[i].secondary);
+    }
+    EXPECT_EQ(decoded.paintFlags, original.paintFlags);
 }

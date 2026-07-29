@@ -81,7 +81,8 @@ namespace OpenLoco
         if (!open(path, mode))
         {
             // TODO: Make this work like fstream which is not throwing for failing to open the file.
-            throw Exception::RuntimeError("Failed to open '" + path.u8string() + "' for writing");
+            const auto* forWhat = mode == StreamMode::read ? "for reading" : "for writing";
+            throw Exception::RuntimeError("Failed to open '" + path.u8string() + "' " + forWhat);
         }
     }
 

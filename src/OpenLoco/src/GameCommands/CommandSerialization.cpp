@@ -6,9 +6,11 @@
 #include "GameCommands/Cheats/Cheat.h"
 #include "GameCommands/Company/BuildCompanyHeadquarters.h"
 #include "GameCommands/Company/ChangeCompanyColour.h"
+#include "GameCommands/Company/ChangeCompanyFace.h"
 #include "GameCommands/Company/ChangeLoan.h"
 #include "GameCommands/Company/CreatePlayerCompany.h"
 #include "GameCommands/Company/RemoveCompanyHeadquarters.h"
+#include "GameCommands/Company/UpdateOwnerStatus.h"
 #include "GameCommands/CompanyAi/AiCreateRoadAndStation.h"
 #include "GameCommands/CompanyAi/AiCreateTrackAndStation.h"
 #include "GameCommands/CompanyAi/AiTrackReplacement.h"
@@ -64,6 +66,7 @@
 #include "GameCommands/Vehicles/VehiclePlaceWater.h"
 #include "GameCommands/Vehicles/VehicleRearrange.h"
 #include "GameCommands/Vehicles/VehicleRefit.h"
+#include "GameCommands/Vehicles/VehicleRepaint.h"
 #include "GameCommands/Vehicles/VehicleReverse.h"
 #include "GameCommands/Vehicles/VehicleSell.h"
 #include "GameCommands/Vehicles/VehicleSpeedControl.h"
@@ -197,6 +200,32 @@ namespace OpenLoco::GameCommands
     static void serializeArgs(TArchive& ar, ChangeCompanyColourSchemeArgs& args)
     {
         ar(args.companyId, args.isPrimary, args.value, args.colourType, args.setColourMode);
+    }
+
+    // Verified symmetric: Args(regs) reconstructs companyId from bh and
+    // objHeader from a straight byte-for-byte repacking of
+    // eax/ecx/edx/edi (no lossy transformation either way), and
+    // operator registers() undoes exactly that repacking. So for any X =
+    // ChangeCompanyFaceArgs(regs), ChangeCompanyFaceArgs(registers(X)) == X
+    // - safe for the generic typed codec, given archive support for
+    // ObjectHeader (added to CommandSerialization.h).
+    template<typename TArchive>
+    static void serializeArgs(TArchive& ar, ChangeCompanyFaceArgs& args)
+    {
+        ar(args.companyId, args.objHeader);
+    }
+
+    // Verified symmetric: OwnerStatus(regs.ax, regs.cx) stores the two
+    // registers verbatim in data[0]/data[1] (the entity-id/position meaning
+    // is derived from those values, not carried separately), and
+    // OwnerStatus::getData() returns them verbatim back to ax/cx. So this is
+    // a true fixed point, unlike the rename commands - safe for the generic
+    // typed codec, given archive support for OwnerStatus (added to
+    // CommandSerialization.h).
+    template<typename TArchive>
+    static void serializeArgs(TArchive& ar, UpdateOwnerStatusArgs& args)
+    {
+        ar(args.ownerStatus);
     }
 
     template<typename TArchive>
@@ -496,6 +525,22 @@ namespace OpenLoco::GameCommands
         ar(args.head);
     }
 
+    // Verified symmetric: each ColourScheme in colours[] is built from a
+    // 16-bit register value masked to the 5-bit primary (bits 0-4) and 5-bit
+    // secondary (bits 8-12) fields; operator registers() repacks them via
+    // the same bit positions (primary | secondary << 8) with no additional
+    // masking. Because primary/secondary are always in [0,31] once stored in
+    // a ColourScheme (Colour is a 5-bit palette id), repacking then
+    // re-unpacking reproduces the same bits exactly, so for any
+    // X = VehicleRepaintArgs(regs), VehicleRepaintArgs(registers(X)) == X.
+    // Safe for the generic typed codec, given archive support for
+    // std::array<ColourScheme, 4> (added to CommandSerialization.h).
+    template<typename TArchive>
+    static void serializeArgs(TArchive& ar, VehicleRepaintArgs& args)
+    {
+        ar(args.head, args.colours, args.paintFlags);
+    }
+
     // ---------------------------------------------------------------------
 
     using EncodeFn = bool (*)(const registers& regs, Stream& stream);
@@ -666,6 +711,9 @@ namespace OpenLoco::GameCommands
         table[static_cast<size_t>(GameCommand::cheat)] = makeTypedCodec<GenericCheatArgs>();
         table[static_cast<size_t>(GameCommand::setGameSpeed)] = makeTypedCodec<SetGameSpeedArgs>();
         table[static_cast<size_t>(GameCommand::vehicleOrderReverse)] = makeTypedCodec<VehicleOrderReverseArgs>();
+        table[static_cast<size_t>(GameCommand::changeCompanyFace)] = makeTypedCodec<ChangeCompanyFaceArgs>();
+        table[static_cast<size_t>(GameCommand::updateOwnerStatus)] = makeTypedCodec<UpdateOwnerStatusArgs>();
+        table[static_cast<size_t>(GameCommand::vehicleRepaint)] = makeTypedCodec<VehicleRepaintArgs>();
 
         constexpr CommandCodec kRenameChunkCodec{ encodeRenameChunk, decodeRenameChunk };
         table[static_cast<size_t>(GameCommand::vehicleRename)] = kRenameChunkCodec;

@@ -9,6 +9,7 @@
 #include "GameStateFlags.h"
 #include "Gui.h"
 #include "Intro.h"
+#include "Logging.h"
 #include "Map/TileManager.h"
 #include "MessageManager.h"
 #include "Objects/ObjectIndex.h"
@@ -89,7 +90,20 @@ namespace OpenLoco::Title
             uint16_t backupWord = getGameState().var_014A;
             auto titlePath = Environment::getPath(Environment::PathId::title);
             SceneManager::removeSceneFlags(SceneManager::Flags::networked);
-            S5::importSaveToGameState(titlePath, S5::LoadFlags::titleSequence);
+            try
+            {
+                S5::importSaveToGameState(titlePath, S5::LoadFlags::titleSequence);
+            }
+            catch (const std::exception& e)
+            {
+                // A missing/corrupt title.dat (e.g. a stub install used for
+                // headless testing) must not crash the game one frame before
+                // importSaveToGameState's own error handling would have
+                // caught a load failure; the title screen simply stays on
+                // whatever state is loaded.
+                auto titlePath8 = titlePath.u8string();
+                Diagnostics::Logging::error("Unable to load title sequence '{}': {}", titlePath8.c_str(), e.what());
+            }
 
             CompanyManager::setControllingId(CompanyId(0));
             CompanyManager::setSecondaryPlayerId(CompanyId::null);

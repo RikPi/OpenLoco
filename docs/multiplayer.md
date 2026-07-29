@@ -123,7 +123,57 @@ reclaim its company, instead of being treated as a brand-new player.
   which is already the case.
 
 Host migration is out of scope for this design; a dead host still ends the
-session.
+session. (Superseded — see § Host migration below.)
+
+## Host migration (design)
+
+Goal: when the host dies or vanishes, the remaining clients continue the
+session under a new host instead of falling back to the title screen.
+
+What makes this tractable in a lockstep architecture: every client already
+holds the complete authoritative game state, the human-company mask, and
+the public roster — the only things that die with the host are command
+ordering, the seat/token table, and everyone's knowledge of each other's
+addresses.
+
+- **Migration plan broadcast.** While healthy, the server periodically
+  (~10 s and on roster change) sends every client a `migrationPlan`
+  packet: an ordered list of successor candidates — client ids paired
+  with their public endpoints *as observed by the server* — ordered by
+  client id (deterministic). Clients just store the latest plan.
+- **Detection and election.** A client whose established connection times
+  out first runs the existing auto-retry (the host may merely have
+  blipped). Only after retries are exhausted does migration begin: the
+  successor is the first entry of the last received plan that is not the
+  dead host. Every client computes this independently and identically.
+- **Becoming the host.** If the successor is *me*: open a server on my
+  configured port, seed the roster from my latest roster snapshot (every
+  entry becomes a reserved seat), keep the human-company mask as-is (no
+  game-state change at all), and enter a ~60 s **migration window**.
+- **Rejoining.** Everyone else waits a few seconds (successor boot time),
+  then connects to the successor's endpoint from the plan. Tokens issued
+  by the dead host are meaningless to the successor, so during the
+  migration window seats may be reclaimed by (name, company) match
+  against the seeded roster — trust-on-first-reconnect, an accepted v1
+  weakness for friends/LAN play, documented; after the window, unclaimed
+  seats stay reserved exactly like ordinary disconnects. The normal
+  snapshot resync then aligns everyone to the successor's tick (a client
+  slightly ahead simply resyncs down; commands the dead host never
+  broadcast are lost, which is indistinguishable from them never having
+  been sent).
+- **The old host's company** becomes a reserved seat like any other
+  disconnect; a recovered old host rejoins by name match within the
+  window or sits reserved after it.
+- **Reachability limits (v1).** The successor's endpoint is whatever the
+  dead server observed; behind NAT that address is generally unreachable
+  from other internet clients. V1 targets LAN and directly-reachable
+  successors; NAT traversal is explicitly out of scope. The master
+  server keeps working transparently: a migrated host that has a master
+  configured simply starts announcing itself.
+
+Wire cost: one new packet kind (`migrationPlan`), a reclaim variant of the
+connect flow (name+company based, gated to the migration window), one
+version bump.
 
 ## LAN server discovery (implemented, network version 7)
 

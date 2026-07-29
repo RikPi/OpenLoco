@@ -172,10 +172,15 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   peers (host-only AI desyncs: `aiThink` mutates state directly).
 - Wire format: `GameCommandPacket` carries field-serialized Args
   (`GameCommands::encode/decodeCommandArgs`, little-endian, codec table in
-  `CommandSerialization.cpp`; raw-registers fallback for 3 complex + 8 stub
-  commands). `Network::toWirePacket`/`fromWirePacket` convert to/from the
-  in-memory `QueuedGameCommand`. Bump `kNetworkVersion` on any wire change
-  (server rejects mismatched clients with a readable message).
+  `CommandSerialization.cpp`; typed coverage is now 79/85 commands (70
+  generic `makeTypedCodec<T>` + 6 rename-chunk + the 3 migrated below);
+  raw-registers fallback remains for 6 stub commands:
+  `loadMultiplayerMap`, `gc_unk_34`, `gc_unk_68`, `gc_unk_70`,
+  `sendChatMessage` (packet-level chat by design, never queued as a game
+  command), `multiplayerSave` (superseded — see Milestone 2's networked
+  save/load rework). `Network::toWirePacket`/`fromWirePacket` convert
+  to/from the in-memory `QueuedGameCommand`. Bump `kNetworkVersion` on any
+  wire change (server rejects mismatched clients with a readable message).
 - Desync handling: mismatch → both sides dump S5 to `save/desync/`
   (`desync_<role>_tick<T>_at<C>.sv5`, diff offline with `compare`), client
   freezes (`resyncing` status) and re-requests the snapshot; stale queued
@@ -200,13 +205,85 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
 - `Args(registers)` constructors and `operator registers()` are not always
   inverses (rename commands: ctor stores the 12-byte chunk at buffer
   start; operator reads from the chunk offset) — generic codec round-trips
-  can corrupt; renames use a dedicated chunk codec.
+  can corrupt; renames use a dedicated chunk codec. This must be re-checked
+  per command before wiring it to the generic typed codec — verified
+  symmetric (a true fixed point: `Args(registers(Args(regs))) ==
+  Args(regs)` for any `regs`) for all 3 of the last complex-type commands
+  (`changeCompanyFace`, `updateOwnerStatus`, `vehicleRepaint` — see §
+  Complex-type typed serialization below), so they use the plain generic
+  codec, not a dedicated one like renames.
 - `registers` sub-fields: writing e.g. `regs.cx` leaves the upper half of
   `ecx` at the 0xCCCCCCCC default — consistent with how vanilla call sites
   behave, but don't compare full registers blobs for equality.
 - Sign extension: packing two int16 coords into one int32
   (`(b << 16) | a`) corrupts `b` when `a < 0` — mask with `& 0xFFFF`
   (fixed in Raise/LowerLand).
+
+## Complex-type typed serialization (changeCompanyFace, updateOwnerStatus, vehicleRepaint)
+
+The last 3 raw-fallback commands with non-trivial field types were migrated
+to the typed codec in `CommandSerialization.{h,cpp}`. All 3 were verified
+symmetric (`Args(registers(X)) == X` for any `X` producible by the regs
+constructor) and use the plain generic `makeTypedCodec<T>`, not a dedicated
+codec — unlike the renames, none of these have a stateful/asymmetric
+regs<->struct conversion.
+
+- `changeCompanyFace` (`ChangeCompanyFaceArgs`): carries an `ObjectHeader`
+  (`Objects/Object.h`, 0x10-byte packed POD: `uint32_t flags`, `char
+  name[8]`, `uint32_t checksum`). The regs ctor/operator just repack the
+  same 16 bytes to/from `eax/ecx/edx/edi` in the same order both ways (no
+  transformation), so it's a genuine fixed point. Archive support: an
+  explicit `ObjectHeader` branch in `ArgsWriter`/`ArgsReader` (added to
+  `CommandSerialization.h`, next to the existing `Pos2`/`Pos3` branches) —
+  `flags` as a plain little-endian u32, `name` as 8 raw bytes (no
+  transformation — it's already a fixed byte buffer), `checksum` as a plain
+  u32. Deliberately NOT a `memcpy` of the whole packed struct, since that
+  would silently break if the struct's layout/packing ever changed.
+- `updateOwnerStatus` (`UpdateOwnerStatusArgs`): carries an `OwnerStatus`
+  (`World/Company.h`). Despite the class having 3 semantic constructors
+  (`EntityId`, `World::Pos2`, default-empty) whose meaning is *derived* from
+  the stored values (`data[0] == -1` ⇒ empty, `== -2` ⇒ entity in
+  `data[1]`, else ⇒ a position in `data[0]/data[1]`), the regs ctor only
+  ever uses the 4th, raw constructor — `OwnerStatus(regs.ax, regs.cx)` sets
+  `data[0]=ax, data[1]=cx` directly — and `getData()` returns `data[0]/[1]`
+  verbatim back to `ax`/`cx`. So there is no lossy interpretation step in
+  the wire path; it's an identity on the two `int16_t`s. Archive support: an
+  explicit `OwnerStatus` branch serializing `data[0]` then `data[1]` as
+  plain `int16_t`s (declaration order — `data` is the class's only member).
+- `vehicleRepaint` (`VehicleRepaintArgs`): carries `std::array<ColourScheme,
+  4> colours` (`QuadraColour`). `ColourScheme` (`Types.hpp`) is `{ Colour
+  primary; Colour secondary; }`, each a 5-bit palette id (`Colour` values
+  are always in [0,30]). The regs ctor masks a 16-bit register value to
+  `primary = val & 0x1F`, `secondary = (val >> 8) & 0x1F`; the operator
+  repacks as `primary | (secondary << 8)` with no further masking — since
+  primary/secondary are already known to be in [0,31] once inside a
+  `ColourScheme`, the repack reproduces the exact same bits, so this is
+  also a genuine fixed point (verified by hand-tracing both directions, not
+  just assumed). Archive support: added a generic `std::array<T, N>` branch
+  (via an `IsStdArray<T>` trait) that loops the element writer/reader, plus
+  a small dedicated `ColourScheme` branch that serializes `primary` then
+  `secondary` (each already handled by the existing generic enum branch).
+  The generic array branch is reusable for any future `std::array<T, N>`
+  field, not just this one.
+- New archive-level tests in `CommandSerializationTests.cpp`:
+  `objectHeaderFieldRoundTrip` (asserts the exact little-endian byte layout,
+  including an embedded NUL and a `0xFF` byte in `name`), and
+  `colourSchemeArrayRoundTrip` (4-element array, byte-count assertion).
+  Typed round-trip tests per command: `typedRoundTripChangeCompanyFace`
+  (edge values: `CompanyId::null` = 0xFF, `flags = 0xFFFFFFFF`, `checksum =
+  0`, a NUL byte inside `name`), `typedRoundTripUpdateOwnerStatusEntity`/
+  `...Position` (negative coordinates)/`...Empty` (one test per `OwnerStatus`
+  semantic case, since they all funnel through the same raw int16 pair),
+  `typedRoundTripVehicleRepaint` (4 distinct `ColourScheme`s + the combined
+  `paintFromVehicleUi` flag set).
+- `rawFallbackRoundTrip` (the generic "stays on raw fallback" test) was
+  re-pointed from `changeCompanyFace` (now typed) to `sendChatMessage` (one
+  of the genuinely-remaining 6 stub commands).
+- Verified: full clean build (App + OpenLocoTests), ctest 152/152 (was 145;
+  +7 new: 2 archive-level + 5 typed round-trip, one per `OwnerStatus` case
+  plus one each for the other two commands), `-TestRename` smoke test PASS
+  (regression — exercises the *unrelated* rename chunk codec end-to-end,
+  confirming this change didn't disturb the existing codec table).
 
 ## Codebase facts
 
