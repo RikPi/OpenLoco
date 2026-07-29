@@ -1,5 +1,6 @@
 #include "Network/NetworkServer.h"
 #include "CommandLine.h"
+#include "Config.h"
 #include "GameCommands/GameCommands.h"
 #include "GameState.h"
 #include "Logging.h"
@@ -11,7 +12,6 @@
 #include <OpenLoco/Core/Exception.hpp>
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/Platform/Platform.h>
-#include <OpenLoco/Utility/String.hpp>
 #include <span>
 
 using namespace OpenLoco;
@@ -73,6 +73,16 @@ void NetworkServer::listen(const std::string& bind, port_t port)
 
 void NetworkServer::onClose()
 {
+    // Tell every still-connected client we're shutting down before the
+    // sockets go away, so they can disconnect gracefully instead of timing
+    // out. sendPacket writes to the socket synchronously, so this does not
+    // depend on the receive thread (already stopped by the time onClose runs).
+    if (!_clients.empty())
+    {
+        ServerClosingPacket packet;
+        sendPacketToAll(packet);
+    }
+
     SceneManager::removeSceneFlags(SceneManager::Flags::networked);
     SceneManager::removeSceneFlags(SceneManager::Flags::networkHost);
     Logging::info("Server closed");
@@ -108,7 +118,7 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
     {
         Logging::info(
             "Rejecting client '{}': network version mismatch (client {}, server {})",
-            Utility::nullTerminatedView(packet.name),
+            resolveDisplayName(std::string_view(packet.name, sizeof(packet.name)), 0),
             packet.version,
             kNetworkVersion);
 
@@ -122,7 +132,10 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
     auto newClient = std::make_unique<Client>();
     newClient->id = _nextClientId++;
     newClient->connection = std::move(conn);
-    newClient->name = Utility::nullTerminatedView(packet.name);
+    // Trim whitespace/NUL padding from the connect packet's fixed-size name
+    // buffer; falls back to "Player #<id>" if it's empty after trimming
+    // (fixes blank-padding in "Accepted new client"/assignment log lines).
+    newClient->name = resolveDisplayName(std::string_view(packet.name, sizeof(packet.name)), newClient->id);
     _clients.push_back(std::move(newClient));
 
     auto& newClientPtr = *_clients.back();
@@ -132,6 +145,8 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
     newClientPtr.connection->sendPacket(response);
 
     Logging::info("Accepted new client: {}", newClientPtr.name);
+
+    broadcastRosterUpdate();
 }
 
 void NetworkServer::onReceivePacket(IUdpSocket& socket, std::unique_ptr<INetworkEndpoint> endpoint, const Packet& packet)
@@ -236,6 +251,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
             CompanyAssignmentPacket packet;
             packet.company = client.company;
             client.connection->sendPacket(packet);
+            broadcastRosterUpdate();
             break;
         }
         case JoinPolicy::spectator:
@@ -244,6 +260,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
             CompanyAssignmentPacket packet;
             packet.company = CompanyId::null;
             client.connection->sendPacket(packet);
+            broadcastRosterUpdate();
             break;
         }
         case JoinPolicy::ownCompany:
@@ -311,13 +328,15 @@ void NetworkServer::onReceiveDesyncReportPacket(Client& client, const DesyncRepo
 
 void NetworkServer::removedTimedOutClients()
 {
+    bool anyRemoved = false;
     for (auto it = _clients.begin(); it != _clients.end();)
     {
         auto& client = *it;
         if (client->connection->hasTimedOut())
         {
-            Logging::info("Client timed out: %s", client->name);
+            Logging::info("Client timed out: {}", client->name);
             it = _clients.erase(it);
+            anyRemoved = true;
         }
         else
         {
@@ -325,8 +344,10 @@ void NetworkServer::removedTimedOutClients()
         }
     }
 
-    _clients.erase(
-        std::remove_if(_clients.begin(), _clients.end(), [](const std::unique_ptr<Client>& client) { return client->connection->hasTimedOut(); }), _clients.end());
+    if (anyRemoved)
+    {
+        broadcastRosterUpdate();
+    }
 }
 
 void NetworkServer::sendPings()
@@ -423,6 +444,36 @@ void NetworkServer::sendChatMessage(std::string_view message)
     _chatMessageQueue.push({ 0, std::string(message) });
 }
 
+std::vector<PlayerRosterEntry> NetworkServer::buildRoster() const
+{
+    std::vector<PlayerRosterEntry> roster;
+    roster.reserve(_clients.size() + 1);
+
+    // client_id_t 0 is reserved for the host (see sendChatMessage's sender).
+    PlayerRosterEntry host;
+    host.id = 0;
+    host.company = CompanyManager::getControllingId();
+    host.name = resolveDisplayName(Config::get().preferredOwnerName, 0);
+    roster.push_back(std::move(host));
+
+    for (auto& client : _clients)
+    {
+        PlayerRosterEntry entry;
+        entry.id = client->id;
+        entry.company = client->company;
+        entry.name = client->name; // already resolved/trimmed at connect time
+        roster.push_back(std::move(entry));
+    }
+    return roster;
+}
+
+void NetworkServer::broadcastRosterUpdate()
+{
+    RosterUpdatePacket packet;
+    toWirePacket(buildRoster(), packet);
+    sendPacketToAll(packet);
+}
+
 void NetworkServer::sendGameCommand(const QueuedGameCommand& command)
 {
     GameCommandPacket packet;
@@ -496,6 +547,8 @@ void NetworkServer::runGameCommands()
                     packet.company = CompanyId::null;
                     client->connection->sendPacket(packet);
                 }
+
+                broadcastRosterUpdate();
             }
         }
 

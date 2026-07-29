@@ -26,6 +26,8 @@ namespace OpenLoco::Network
         gameCommand,
         desyncReport,
         companyAssignment,
+        rosterUpdate,
+        serverClosing,
     };
 
     struct PacketHeader
@@ -200,6 +202,56 @@ namespace OpenLoco::Network
         CompanyId company{ CompanyId::null };
     };
 
+    // Cap on a roster entry's display name, and on the number of entries a
+    // single RosterUpdatePacket can carry. Chosen generously (both keep the
+    // packet well inside kMaxPacketDataSize) - see the static_assert below.
+    constexpr size_t kMaxRosterNameLength = 31;
+    constexpr size_t kMaxRosterEntries = 32;
+
+    /**
+     * One player/spectator entry in a roster snapshot. name is not
+     * null-terminated on the wire; nameLength gives its length (already
+     * trimmed and capped to kMaxRosterNameLength - see
+     * Network::resolveDisplayName).
+     */
+    struct RosterEntry
+    {
+        client_id_t id{};
+        CompanyId company{ CompanyId::null };
+        uint8_t nameLength{};
+        char name[kMaxRosterNameLength]{};
+    };
+
+    /**
+     * Broadcast by the server to all clients whenever the player roster
+     * changes (client accepted, client removed/timed out, company
+     * assigned). Presentation data only - never touches GameState or the
+     * game command stream. Follows the same "reserve the max, send only
+     * what's used" pattern as SendChatMessage: entries beyond `count` are
+     * never put on the wire.
+     */
+    struct RosterUpdatePacket
+    {
+        static constexpr PacketKind kind = PacketKind::rosterUpdate;
+        size_t size() const { return reinterpret_cast<size_t>(this->entries + count) - reinterpret_cast<size_t>(this); }
+
+        uint8_t count{};
+        RosterEntry entries[kMaxRosterEntries]{};
+    };
+    static_assert(sizeof(RosterUpdatePacket) <= kMaxPacketDataSize);
+
+    /**
+     * Sent by the server to every client immediately before it tears down
+     * its sockets (host quit / process exit), so clients can disconnect
+     * gracefully and return to the title scene instead of waiting out a
+     * connection timeout. No payload.
+     */
+    struct ServerClosingPacket
+    {
+        static constexpr PacketKind kind = PacketKind::serverClosing;
+        size_t size() const { return sizeof(ServerClosingPacket); }
+    };
+
     /**
      * Wire form of a game command. The argument payload is the portable
      * field-by-field serialization produced by GameCommands::encodeCommandArgs
@@ -247,4 +299,16 @@ namespace OpenLoco::Network
      * Returns false if the payload is malformed.
      */
     bool fromWirePacket(const GameCommandPacket& packet, QueuedGameCommand& command);
+
+    /**
+     * Serializes a roster snapshot into a wire packet. Returns false (and
+     * logs) if there are more entries than a RosterUpdatePacket can carry;
+     * the packet is filled with as many entries as fit either way.
+     */
+    bool toWirePacket(const std::vector<PlayerRosterEntry>& roster, RosterUpdatePacket& packet);
+
+    /**
+     * Parses a roster wire packet back into a snapshot.
+     */
+    std::vector<PlayerRosterEntry> fromWirePacket(const RosterUpdatePacket& packet);
 }

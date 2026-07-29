@@ -37,6 +37,10 @@ namespace OpenLoco::Network
         uint32_t _serverTick;
         std::list<QueuedGameCommand> _receivedGameCommands;
 
+        // Latest roster snapshot received from the server (RosterUpdatePacket).
+        // Presentation data only - never fed back into GameState/game commands.
+        std::vector<PlayerRosterEntry> _roster;
+
         struct ReceivedChunk
         {
             uint32_t offset{};
@@ -103,6 +107,8 @@ namespace OpenLoco::Network
         void receivePingPacket(const PingPacket& packet);
         void receiveGameCommandPacket(const GameCommandPacket& packet);
         void receiveCompanyAssignmentPacket(const CompanyAssignmentPacket& packet);
+        void receiveRosterUpdatePacket(const RosterUpdatePacket& packet);
+        void receiveServerClosingPacket(const ServerClosingPacket& packet);
 
         void checkForDesync();
         void onDesyncDetected(const PingPacket& serverState, const TickRngState& localState);
@@ -118,6 +124,7 @@ namespace OpenLoco::Network
 
         NetworkClientStatus getStatus() const;
         uint32_t getLocalTick() const;
+        const std::vector<PlayerRosterEntry>& getRoster() const;
 
         void connect(std::string_view host, port_t port);
         void sendChatMessage(std::string_view message) override;

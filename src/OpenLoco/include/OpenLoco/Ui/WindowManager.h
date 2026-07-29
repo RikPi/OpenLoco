@@ -139,7 +139,7 @@ namespace OpenLoco::Ui::Windows
     namespace Chat
     {
         Window* open();
-        void addMessage(uint32_t clientId, std::string_view message);
+        void addMessage(std::string_view senderName, std::string_view message);
     }
 
     namespace Cheats
@@ -309,6 +309,11 @@ namespace OpenLoco::Ui::Windows
     {
         Window* open();
         void invalidateFrame();
+    }
+
+    namespace PlayerList
+    {
+        Window* open();
     }
 
     namespace ProgressBar

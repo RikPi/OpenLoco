@@ -330,6 +330,7 @@ set(OLOCO_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/ObjectSelectionWindow.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/Options.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/PlayerInfoPanel.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/PlayerList.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/ProgressBar.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/PromptBrowseWindow.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Ui/Windows/PromptOkCancelWindow.cpp"

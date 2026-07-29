@@ -71,6 +71,7 @@ namespace OpenLoco::Ui
         objectLoadError = 60,
 
         debug = 61,
+        playerList = 62,
 
         undefined = 255
     };

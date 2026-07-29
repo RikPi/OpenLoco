@@ -64,6 +64,7 @@ namespace OpenLoco::Network
         void onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet);
         void onReceiveGameCommandPacket(Client& client, const GameCommandPacket& packet);
         void onReceiveDesyncReportPacket(Client& client, const DesyncReportPacket& packet);
+        void broadcastRosterUpdate();
         void removedTimedOutClients();
         void sendPings();
         void sendChatMessages();
@@ -94,5 +95,11 @@ namespace OpenLoco::Network
 
         void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags, client_id_t requestedBy = 0);
         void runGameCommands();
+
+        // Builds the authoritative roster from the live client list plus the
+        // host itself (client_id_t 0). Used both to broadcast
+        // RosterUpdatePacket to clients and to answer Network::getPlayerRoster()
+        // locally on the host, so there is one source of truth.
+        std::vector<PlayerRosterEntry> buildRoster() const;
     };
 }

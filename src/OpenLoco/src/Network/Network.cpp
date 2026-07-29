@@ -17,6 +17,8 @@
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Core/FileStream.h>
 #include <OpenLoco/Core/MemoryStream.h>
+#include <OpenLoco/Utility/String.hpp>
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <fmt/format.h>
@@ -26,6 +28,63 @@ using namespace OpenLoco::Diagnostics;
 
 namespace OpenLoco::Network
 {
+    std::string resolveDisplayName(std::string_view raw, client_id_t id)
+    {
+        // A wire buffer or config value may be padded with trailing/embedded
+        // NUL bytes; take only the part before the first one.
+        auto nul = raw.find('\0');
+        if (nul != std::string_view::npos)
+        {
+            raw = raw.substr(0, nul);
+        }
+
+        auto trimmed = Utility::trim(raw);
+        if (trimmed.empty())
+        {
+            return fmt::format("Player #{}", id);
+        }
+        return std::string(trimmed);
+    }
+
+    bool toWirePacket(const std::vector<PlayerRosterEntry>& roster, RosterUpdatePacket& packet)
+    {
+        if (roster.size() > kMaxRosterEntries)
+        {
+            Logging::error("Player roster has {} entries, only {} fit in a RosterUpdatePacket; truncating", roster.size(), kMaxRosterEntries);
+        }
+
+        packet.count = static_cast<uint8_t>(std::min(roster.size(), kMaxRosterEntries));
+        for (uint8_t i = 0; i < packet.count; i++)
+        {
+            const auto& src = roster[i];
+            auto& dst = packet.entries[i];
+            dst.id = src.id;
+            dst.company = src.company;
+            auto nameLength = std::min(src.name.size(), kMaxRosterNameLength);
+            dst.nameLength = static_cast<uint8_t>(nameLength);
+            std::memcpy(dst.name, src.name.data(), nameLength);
+        }
+        return roster.size() <= kMaxRosterEntries;
+    }
+
+    std::vector<PlayerRosterEntry> fromWirePacket(const RosterUpdatePacket& packet)
+    {
+        std::vector<PlayerRosterEntry> roster;
+        auto count = std::min<uint8_t>(packet.count, kMaxRosterEntries);
+        roster.reserve(count);
+        for (uint8_t i = 0; i < count; i++)
+        {
+            const auto& src = packet.entries[i];
+            PlayerRosterEntry entry;
+            entry.id = src.id;
+            entry.company = src.company;
+            auto nameLength = std::min<size_t>(src.nameLength, kMaxRosterNameLength);
+            entry.name.assign(src.name, nameLength);
+            roster.push_back(std::move(entry));
+        }
+        return roster;
+    }
+
     bool toWirePacket(const QueuedGameCommand& command, GameCommandPacket& packet)
     {
         MemoryStream ms;
@@ -190,10 +249,39 @@ namespace OpenLoco::Network
         }
     }
 
+    std::vector<PlayerRosterEntry> getPlayerRoster()
+    {
+        switch (_mode)
+        {
+            case NetworkMode::server:
+                return _server->buildRoster();
+            case NetworkMode::client:
+                return _client->getRoster();
+            default:
+                return {};
+        }
+    }
+
+    static std::string resolveChatSenderName(client_id_t client)
+    {
+        auto roster = getPlayerRoster();
+        for (const auto& entry : roster)
+        {
+            if (entry.id == client)
+            {
+                return entry.name;
+            }
+        }
+        // Roster not available yet (e.g. very first messages before a
+        // RosterUpdatePacket has arrived) - fall back to the old behaviour.
+        return fmt::format("Player #{}", client);
+    }
+
     void receiveChatMessage(client_id_t client, std::string_view message)
     {
-        Logging::info("Player #{}: {}", static_cast<int>(client), message);
-        Ui::Windows::Chat::addMessage(static_cast<uint32_t>(client), message);
+        auto senderName = resolveChatSenderName(client);
+        Logging::info("{}: {}", senderName, message);
+        Ui::Windows::Chat::addMessage(senderName, message);
     }
 
     void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags)

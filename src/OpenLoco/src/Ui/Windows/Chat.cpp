@@ -78,10 +78,11 @@ namespace OpenLoco::Ui::Windows::Chat
 
     // Called by Network::receiveChatMessage whenever a chat message (including
     // our own, echoed back by the server) arrives. Opens the window on the
-    // first message if it isn't already open.
-    void addMessage(uint32_t clientId, std::string_view message)
+    // first message if it isn't already open. senderName is already resolved
+    // (roster lookup, or a "Player #N" fallback) by the caller.
+    void addMessage(std::string_view senderName, std::string_view message)
     {
-        _history.push_back(fmt::format("Player #{}: {}", clientId, message));
+        _history.push_back(fmt::format("{}: {}", senderName, message));
         while (_history.size() > kMaxMessages)
         {
             _history.pop_front();

@@ -245,6 +245,11 @@ namespace OpenLoco::Ui::Windows::TimePanel
     {
         Chat::open();
 
+        // No other reachable UI trigger for the roster window yet (see
+        // KNOWLEDGEBASE.md); opening it alongside Chat here is the simplest
+        // way to make it reachable without adding new caption strings.
+        PlayerList::open();
+
         const auto* opponent = CompanyManager::getOpponent();
         auto args = FormatArguments::common();
         args.push(opponent->name);

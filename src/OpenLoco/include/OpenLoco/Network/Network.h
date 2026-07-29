@@ -2,7 +2,9 @@
 
 #include "Types.hpp"
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace OpenLoco::GameCommands
 {
@@ -24,7 +26,33 @@ namespace OpenLoco::Network
     // human-company set (ExtraState::humanCompanyMask) and a new
     // CompanyAssignmentPacket tells a joining client which company (if any)
     // it was assigned.
-    constexpr uint16_t kNetworkVersion = 3;
+    // Version 4: player roster (RosterUpdatePacket, presentation data only -
+    // never touches GameState/game commands) and graceful server shutdown
+    // notification (ServerClosingPacket).
+    constexpr uint16_t kNetworkVersion = 4;
+
+    /**
+     * Machine-local snapshot of one player/spectator, used to drive the
+     * player list UI and to resolve chat sender names. Never part of
+     * GameState and never fed into a game command - purely presentation
+     * data, mirrored from the server's authoritative view via
+     * RosterUpdatePacket.
+     */
+    struct PlayerRosterEntry
+    {
+        client_id_t id{};
+        CompanyId company{ CompanyId::null };
+        std::string name;
+    };
+
+    /**
+     * Trims a possibly whitespace/NUL-padded display name (e.g. a fixed-size
+     * wire buffer, or a machine-local config value) and falls back to
+     * "Player #<id>" if the result is empty. Centralizes the display-name
+     * rule so every place that logs or stores a name (client accept,
+     * company assignment, roster) agrees.
+     */
+    std::string resolveDisplayName(std::string_view raw, client_id_t id);
 
     void openServer();
     bool joinServer(std::string_view host);
@@ -34,6 +62,16 @@ namespace OpenLoco::Network
 
     void sendChatMessage(std::string_view message);
     void receiveChatMessage(client_id_t client, std::string_view message);
+
+    /**
+     * The current player roster: one entry per connected client plus the
+     * host itself (client_id_t 0). Works identically whether called on the
+     * server or a client - the single call UI code should use. Returns a
+     * snapshot copy; on the server it is rebuilt on every call from the
+     * live client list, on a client it is the latest RosterUpdatePacket
+     * received from the server.
+     */
+    std::vector<PlayerRosterEntry> getPlayerRoster();
 
     void queueGameCommand(CompanyId company, const OpenLoco::GameCommands::registers& regs, const uint8_t flags);
     bool shouldProcessTick(uint32_t tick);

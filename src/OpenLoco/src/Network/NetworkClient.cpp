@@ -16,6 +16,7 @@
 #include <OpenLoco/Platform/Platform.h>
 #include <algorithm>
 #include <cstring>
+#include <fmt/format.h>
 
 using namespace OpenLoco;
 using namespace OpenLoco::Network;
@@ -34,6 +35,11 @@ NetworkClientStatus NetworkClient::getStatus() const
 uint32_t NetworkClient::getLocalTick() const
 {
     return _localTick;
+}
+
+const std::vector<PlayerRosterEntry>& NetworkClient::getRoster() const
+{
+    return _roster;
 }
 
 // Headless test hook (--test_rename). Called from onUpdate(), i.e. the
@@ -309,6 +315,12 @@ void NetworkClient::onReceivePacketFromServer(const Packet& packet)
         case PacketKind::companyAssignment:
             receiveCompanyAssignmentPacket(*reinterpret_cast<const CompanyAssignmentPacket*>(packet.data));
             break;
+        case PacketKind::rosterUpdate:
+            receiveRosterUpdatePacket(*reinterpret_cast<const RosterUpdatePacket*>(packet.data));
+            break;
+        case PacketKind::serverClosing:
+            receiveServerClosingPacket(*reinterpret_cast<const ServerClosingPacket*>(packet.data));
+            break;
         default:
             break;
     }
@@ -456,6 +468,51 @@ void NetworkClient::receiveCompanyAssignmentPacket(const CompanyAssignmentPacket
     {
         _testRenameState = TestRenameState::assignedWaitingConnected;
     }
+}
+
+void NetworkClient::receiveRosterUpdatePacket(const RosterUpdatePacket& packet)
+{
+    _roster = Network::fromWirePacket(packet);
+
+    std::string summary;
+    for (size_t i = 0; i < _roster.size(); i++)
+    {
+        if (i > 0)
+        {
+            summary += ", ";
+        }
+        const auto& entry = _roster[i];
+        if (entry.company == CompanyId::null)
+        {
+            summary += fmt::format("'{}' spectator", entry.name);
+        }
+        else
+        {
+            summary += fmt::format("'{}' company {}", entry.name, static_cast<uint32_t>(entry.company));
+        }
+    }
+    Logging::info("Roster: {} players: {}", _roster.size(), summary);
+
+    Ui::WindowManager::invalidate(Ui::WindowType::playerList);
+}
+
+void NetworkClient::receiveServerClosingPacket([[maybe_unused]] const ServerClosingPacket& packet)
+{
+    Logging::info("Server is shutting down");
+    Ui::Windows::Chat::addMessage("Server", "Server is shutting down");
+
+    // Request the title scene before tearing the connection down; requestScene
+    // just sets a deferred flag applied once the current tick unwinds, so
+    // order relative to close() below doesn't matter. Mirrors onClose()'s own
+    // "networked session is over" bookkeeping - kept simple and headless-safe
+    // (no window is required to be open for this to work).
+    SceneManager::requestScene(SceneManager::SceneId::title);
+
+    // Closing here is safe even mid packet-loop: processReceivedPackets()
+    // already anticipates a packet handler closing the connection (see its
+    // "_serverConnection == nullptr" check) - the same pattern
+    // receiveConnectionResponsePacket uses on rejection.
+    close();
 }
 
 void NetworkClient::receivePingPacket(const PingPacket& packet)
