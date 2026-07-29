@@ -189,7 +189,12 @@ namespace OpenLoco::Ui::Windows::ServerBrowser
             auto compatible = server.version == Network::kNetworkVersion;
             auto textColour = compatible ? Colour::black : Colour::grey;
 
-            auto line = fmt::format("{} - {}/{} - {}:{}", server.name, server.playerCount, server.maxPlayers, server.address, server.port);
+            // Master-sourced entries (docs/multiplayer.md § "Master server
+            // (phase 2 - design)") get a subtle "[master]" suffix so players
+            // can tell a LAN-discovered server apart from an internet one;
+            // LAN entries are unmarked (also the more common/expected case).
+            auto sourceSuffix = server.source == Network::DiscoveredServerSource::master ? " [master]" : "";
+            auto line = fmt::format("{} - {}/{} - {}:{}{}", server.name, server.playerCount, server.maxPlayers, server.address, server.port, sourceSuffix);
             tr.drawString(point, textColour, line.c_str());
             point.y += kRowHeight;
         }

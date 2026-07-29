@@ -31,6 +31,15 @@ namespace OpenLoco::Network
         resyncRequired,
         discoveryRequest,
         discoveryResponse,
+        // Master server (phase 2, docs/multiplayer.md § "Master server
+        // (phase 2 - design)"): three connectionless kinds mirroring
+        // tools/master-server/protocol.go exactly - the numeric values are
+        // load-bearing (the Go service hard-codes 18/19/20). Like
+        // discoveryRequest/discoveryResponse, these bypass NetworkConnection
+        // sequencing entirely (no acks, sequence always 0).
+        masterAnnounce,
+        masterQuery,
+        masterServerList,
     };
 
     struct PacketHeader
@@ -325,6 +334,96 @@ namespace OpenLoco::Network
         char name[kMaxRosterNameLength]{};
     };
     static_assert(sizeof(DiscoveryResponsePacket) <= kMaxPacketDataSize);
+
+    /**
+     * Sent by a hosting server to the configured master server (see
+     * docs/multiplayer.md § "Master server (phase 2 - design)" and
+     * tools/master-server/protocol.go, which this mirrors field-for-field)
+     * roughly every 30s and immediately on roster change. Connectionless,
+     * like DiscoveryRequestPacket - built and sent directly via the socket,
+     * never via a NetworkConnection. The master records the announce's
+     * *observed* source address plus gamePort as the registered public
+     * endpoint; the payload itself carries no address.
+     */
+    struct MasterAnnouncePacket
+    {
+        static constexpr PacketKind kind = PacketKind::masterAnnounce;
+        size_t size() const { return sizeof(MasterAnnouncePacket); }
+
+        uint16_t version{};
+        uint16_t gamePort{};
+        uint8_t playerCount{};
+        uint8_t maxPlayers{}; // kMaxRosterEntries
+        uint8_t joinPolicy{}; // OpenLoco::JoinPolicy, wire-encoded as a plain byte (see DiscoveryResponsePacket)
+        uint8_t nameLength{};
+        char name[kMaxRosterNameLength]{};
+    };
+    static_assert(sizeof(MasterAnnouncePacket) == 39);
+    static_assert(sizeof(MasterAnnouncePacket) <= kMaxPacketDataSize);
+
+    /**
+     * Sent by a browsing client to the configured master server to request
+     * the current server list. Connectionless, like DiscoveryRequestPacket.
+     * The master replies directly to the sender with a MasterServerListPacket
+     * echoing this cookie.
+     */
+    struct MasterQueryPacket
+    {
+        static constexpr PacketKind kind = PacketKind::masterQuery;
+        size_t size() const { return sizeof(MasterQueryPacket); }
+
+        uint32_t cookie{};
+    };
+    static_assert(sizeof(MasterQueryPacket) == 4);
+
+    // Cap on the number of entries a single MasterServerListPacket can carry
+    // - mirrors tools/master-server/protocol.go's kMaxServerListEntries
+    // exactly (derived there so the framed packet never exceeds
+    // kMaxPacketDataSize; see the comment on MasterServerListPacket below).
+    constexpr size_t kMaxMasterServerListEntries = 95;
+
+    /**
+     * One entry in a MasterServerListPacket - mirrors
+     * tools/master-server/protocol.go's ServerListEntry field-for-field.
+     * `ipv4` is the one field in the whole protocol that is deliberately NOT
+     * little-endian: it is raw octet order (e.g. 1.2.3.4 -> bytes
+     * {1,2,3,4}), matching a raw sin_addr layout, per the design doc -
+     * stored here as a plain byte array specifically to avoid any host
+     * byte-order interpretation on either side.
+     */
+    struct MasterServerListEntry
+    {
+        uint8_t ipv4[4]{}; // network/octet byte order - NOT host byte order
+        uint16_t port{};
+        uint16_t version{};
+        uint8_t playerCount{};
+        uint8_t maxPlayers{};
+        uint8_t joinPolicy{};
+        uint8_t nameLength{};
+        char name[kMaxRosterNameLength]{};
+    };
+    static_assert(sizeof(MasterServerListEntry) == 43);
+
+    /**
+     * Reply to a MasterQueryPacket, sent by the master server directly to
+     * the querying address (connectionless). Follows the same "reserve the
+     * max, send only what's used" pattern as RosterUpdatePacket - entries
+     * beyond `count` are never put on the wire, and dataSize (not sizeof(T))
+     * is what a receiver must trust when reading `entries`. The 95-entry cap
+     * keeps the framed packet's size exactly at kMaxPacketDataSize (see
+     * tools/master-server/protocol.go's derivation): 4 (cookie) + 1 (count)
+     * + 95*43 (entries) = 4090.
+     */
+    struct MasterServerListPacket
+    {
+        static constexpr PacketKind kind = PacketKind::masterServerList;
+        size_t size() const { return reinterpret_cast<size_t>(this->entries + count) - reinterpret_cast<size_t>(this); }
+
+        uint32_t cookie{}; // echoed from the request
+        uint8_t count{};
+        MasterServerListEntry entries[kMaxMasterServerListEntries]{};
+    };
+    static_assert(sizeof(MasterServerListPacket) <= kMaxPacketDataSize);
 
     /**
      * Wire form of a game command. The argument payload is the portable

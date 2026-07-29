@@ -61,6 +61,13 @@ namespace OpenLoco
         std::cout << "                            - own: a freshly created company (default)" << std::endl;
         std::cout << "                            - coop: share the host's company" << std::endl;
         std::cout << "                            - spectator: watch only" << std::endl;
+        std::cout << "--master_server <host[:port]>" << std::endl;
+        std::cout << "                            Overrides the network.masterServer config value for this" << std::endl;
+        std::cout << "                            process: while hosting, announces this server to the given" << std::endl;
+        std::cout << "                            master server roughly every 30s; when browsing, queries it" << std::endl;
+        std::cout << "                            alongside LAN discovery. Port defaults to 11756 if omitted." << std::endl;
+        std::cout << "                            Useful for dedicated servers that should not need to touch" << std::endl;
+        std::cout << "                            the shared config file." << std::endl;
     }
 
     static int uncompressFile(const CommandLineOptions& options)

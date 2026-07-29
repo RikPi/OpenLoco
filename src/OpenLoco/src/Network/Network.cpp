@@ -52,11 +52,11 @@ namespace OpenLoco::Network
     // Moved here (unchanged) from TitleMenu::multiplayerConnect so both the
     // ServerBrowser "Join by address" prompt and (previously) the TitleMenu
     // address prompt share one implementation.
-    std::pair<std::string, port_t> parseServerAddress(std::string_view input)
+    std::pair<std::string, port_t> parseServerAddress(std::string_view input, port_t defaultPort)
     {
         // Accepts "host", "host:port" and "[ipv6]:port".
         auto host = input;
-        auto port = kDefaultPort;
+        auto port = defaultPort;
 
         auto parsePort = [&](std::string_view text) {
             uint32_t value = 0;
@@ -350,8 +350,15 @@ namespace OpenLoco::Network
                     continue;
                 }
                 _testDiscoverLogged.push_back(key);
+                // Master-sourced entries (docs/multiplayer.md § "Master
+                // server (phase 2 - design)") get a distinct label so the
+                // smoke test can assert on either source independently.
+                auto label = server.source == DiscoveredServerSource::master
+                    ? "[TEST] discovered server (master):"
+                    : "[TEST] discovered server:";
                 Logging::info(
-                    "[TEST] discovered server: '{}' {}:{} players={}/{} version={}",
+                    "{} '{}' {}:{} players={}/{} version={}",
+                    label,
                     server.name,
                     server.address,
                     server.port,

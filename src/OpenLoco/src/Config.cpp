@@ -105,6 +105,7 @@ namespace OpenLoco::Config
             networkConfig.enabled = networkNode["enabled"].as<bool>(true);
             networkConfig.bind = networkNode["bind"].as<std::string>("");
             networkConfig.port = networkNode["port"].as<uint16_t>(11754);
+            networkConfig.masterServer = networkNode["masterServer"].as<std::string>("");
         }
 
         // General
@@ -257,6 +258,7 @@ namespace OpenLoco::Config
         networkNode["enabled"] = networkConfig.enabled;
         networkNode["bind"] = networkConfig.bind;
         networkNode["port"] = networkConfig.port;
+        networkNode["masterServer"] = networkConfig.masterServer;
         node["network"] = networkNode;
 
         // General

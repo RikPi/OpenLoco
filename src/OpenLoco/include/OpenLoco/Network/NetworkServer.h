@@ -97,6 +97,17 @@ namespace OpenLoco::Network
         // Used by the headless test hooks below to measure uptime.
         uint32_t _startTime{};
 
+        // Master server (docs/multiplayer.md § "Master server (phase 2 -
+        // design)"): resolved from network.masterServer / --master_server at
+        // listen() time. _masterServerHost empty means the feature is
+        // disabled - nothing is ever sent. See updateMasterAnnounce() and
+        // sendMasterAnnounce().
+        std::string _masterServerHost;
+        port_t _masterServerPort{};
+        uint32_t _lastMasterAnnounce{};
+        void updateMasterAnnounce();
+        void sendMasterAnnounce();
+
         // Headless test hook (--test_host_load <seconds>, CommandLine.h):
         // once the server has been up for <seconds> and at least one client
         // has a resolved join assignment, reloads the same save the host was

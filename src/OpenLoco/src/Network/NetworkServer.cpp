@@ -16,12 +16,17 @@
 #include <algorithm>
 #include <random>
 #include <span>
+#include <tuple>
 
 using namespace OpenLoco;
 using namespace OpenLoco::Network;
 using namespace OpenLoco::Diagnostics;
 
 constexpr uint32_t kPingInterval = 30;
+// Master server announce cadence (docs/multiplayer.md § "Master server
+// (phase 2 - design)"): ~30s, plus an immediate announce on every roster
+// change (see NetworkServer::broadcastRosterUpdate).
+constexpr uint32_t kMasterAnnounceIntervalMs = 30000;
 
 namespace
 {
@@ -82,6 +87,25 @@ void NetworkServer::listen(const std::string& bind, port_t port)
     SceneManager::addSceneFlags(SceneManager::Flags::networkHost);
 
     _startTime = Platform::getTime();
+
+    // Master server (docs/multiplayer.md § "Master server (phase 2 -
+    // design)"): --master_server overrides network.masterServer, same
+    // precedence as --bind/--port. Empty means disabled - no announces are
+    // ever sent.
+    const auto& cmdlineOptions = getCommandLineOptions();
+    const auto& masterServerConfig = !cmdlineOptions.masterServer.empty() ? cmdlineOptions.masterServer : Config::get().network.masterServer;
+    if (!masterServerConfig.empty())
+    {
+        std::tie(_masterServerHost, _masterServerPort) = parseServerAddress(masterServerConfig, kDefaultMasterServerPort);
+        Logging::info("Announcing to master server {}:{}", _masterServerHost, _masterServerPort);
+
+        // Announce immediately rather than waiting a full ~30s interval -
+        // otherwise a freshly started dedicated server would be invisible
+        // to the master (and anyone querying it) for up to 30s, unlike LAN
+        // discovery, which answers requests the instant it's listening.
+        sendMasterAnnounce();
+        _lastMasterAnnounce = Platform::getTime();
+    }
 
     Logging::info("Server opened");
     for (const auto& socket : _sockets)
@@ -673,6 +697,7 @@ void NetworkServer::onUpdate()
     sendChatMessages();
     sendPings();
     removedTimedOutClients();
+    updateMasterAnnounce();
     updateTestHostLoadHook();
     updateTestShutdownHook();
 }
@@ -731,6 +756,69 @@ void NetworkServer::broadcastRosterUpdate()
     RosterUpdatePacket packet;
     toWirePacket(buildRoster(), packet);
     sendPacketToAll(packet);
+
+    // Master server (docs/multiplayer.md § "Master server (phase 2 -
+    // design)"): announce immediately on roster change, in addition to the
+    // periodic ~30s cadence driven from onUpdate() - see updateMasterAnnounce().
+    if (!_masterServerHost.empty())
+    {
+        sendMasterAnnounce();
+        _lastMasterAnnounce = Platform::getTime();
+    }
+}
+
+void NetworkServer::updateMasterAnnounce()
+{
+    if (_masterServerHost.empty())
+    {
+        return;
+    }
+
+    auto now = Platform::getTime();
+    if (now - _lastMasterAnnounce < kMasterAnnounceIntervalMs)
+    {
+        return;
+    }
+
+    _lastMasterAnnounce = now;
+    sendMasterAnnounce();
+}
+
+void NetworkServer::sendMasterAnnounce()
+{
+    MasterAnnouncePacket announce;
+    announce.version = kNetworkVersion;
+    announce.gamePort = _listenPort;
+    announce.playerCount = static_cast<uint8_t>(std::min<size_t>(_clients.size() + 1, 255)); // +1 for the host itself
+    announce.maxPlayers = static_cast<uint8_t>(kMaxRosterEntries);
+    announce.joinPolicy = static_cast<uint8_t>(getCommandLineOptions().joinPolicy);
+
+    auto name = resolveDisplayName(Config::get().preferredOwnerName, 0);
+    auto nameLength = std::min(name.size(), sizeof(announce.name));
+    announce.nameLength = static_cast<uint8_t>(nameLength);
+    std::memcpy(announce.name, name.data(), nameLength);
+
+    // Connectionless send, exactly like onReceiveDiscoveryRequestPacket's
+    // reply: framed manually and written straight to the socket, no
+    // NetworkConnection/sequencing/ack. The master server is IPv4-only (see
+    // tools/master-server/README.md), so this is sent specifically via this
+    // server's IPv4 listening socket.
+    Packet framed;
+    framed.header.kind = PacketKind::masterAnnounce;
+    framed.header.sequence = 0;
+    framed.header.dataSize = static_cast<uint16_t>(sizeof(announce));
+    std::memcpy(framed.data, &announce, sizeof(announce));
+
+    for (auto& socket : _sockets)
+    {
+        if (socket->getProtocol() == Protocol::ipv4)
+        {
+            socket->sendData(Protocol::ipv4, _masterServerHost, _masterServerPort, &framed, sizeof(PacketHeader) + framed.header.dataSize);
+            break;
+        }
+    }
+
+    Logging::verbose("Sent masterAnnounce to master server {}:{}", _masterServerHost, _masterServerPort);
 }
 
 void NetworkServer::sendGameCommand(const QueuedGameCommand& command)

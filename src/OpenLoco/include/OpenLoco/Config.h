@@ -147,6 +147,15 @@ namespace OpenLoco::Config
         // matching the CLI's own default.
         std::string bind;
         uint16_t port{ 11754 };
+
+        // Master server (docs/multiplayer.md § "Master server (phase 2 -
+        // design)"): "host" or "host:port" of an internet-wide server list
+        // to announce to (while hosting) and query (in the server browser).
+        // Empty disables the feature entirely. Port defaults to
+        // kDefaultMasterServerPort (11756) when omitted - see
+        // Network::parseServerAddress. The CLI --master_server option
+        // overrides this value, same precedence as --bind/--port.
+        std::string masterServer;
     };
 
     constexpr auto kMessageCriticalityCount = 6;

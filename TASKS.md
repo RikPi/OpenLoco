@@ -433,11 +433,23 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       sketch (UDP + HTTP service blocks) — noting the in-memory registry
       means a redeploy just drops entries, which self-heals within one TTL
       window as hosts re-announce.
-      **Not done yet** (the other half of phase 2): the game-side change
-      (`Packet.h` enum append + payload structs, `NetworkServer` periodic
-      announce sender, in-game browser query + merge with LAN discovery
-      results, `network.masterServer` config value) — none of that is
-      touched by this commit, which is master-server-service-only.
+- [x] **Game-side master server integration (network v8)** — phase 2
+      complete. `Packet.h` gains masterAnnounce/masterQuery/masterServerList
+      (18/19/20, matching the service); `network.masterServer` config value
+      plus a documented `--master_server <host[:port]>` CLI override (wins
+      over config; useful for dedicated servers). While hosting with a
+      master configured, the server announces every ~30s and on roster
+      changes from its existing socket; the browser/discovery component
+      queries the master ~every 2s and merges results with LAN probes
+      (dedupe by endpoint, LAN wins; master entries tagged in the browser
+      and in `--test_discover` output as "(master)"). Verified by the new
+      `-TestMaster` smoke mode: builds the real Go service, runs it as a
+      third loopback process, asserts host "Announcing to master server",
+      client `[TEST] discovered server (master): ...` with correct
+      name/port/version, all processes alive, no errors. Also fixed a
+      latent smoke-script bug found here: host/client log attribution
+      sorted by LastWriteTime (unstable — whoever flushed last); now
+      sorted by filename (embedded creation timestamp).
 
 ## Backlog
 
@@ -522,10 +534,10 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       explicitly out of scope per the design doc and is not addressed.
 - [ ] Lobby & server browser — phase 1 (LAN discovery) done, see the
       completed "LAN server discovery" item below. Phase 2 (internet master
-      server): the standalone Go service is done (see "Milestone: master
-      server (phase 2 — service half done)" above); the game-side half
-      (Packet.h additions, periodic announce sender, browser query/merge,
-      `network.masterServer` config value) is not yet started.
+      server): COMPLETE — Go service + game-side integration both done (see
+      the master server milestone section above). Deployment to a real
+      host (user's VPS or Fly.io) is an ops task for whenever wanted; the
+      game points at it via `network.masterServer` or `--master_server`.
 - [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
 - [x] Graceful shutdown for `--headless`: hidden `--test_shutdown_after
       <seconds>` CLI-driven hook (`CommandLine.{h,cpp}`, deliberately not in

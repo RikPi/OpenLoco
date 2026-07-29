@@ -22,11 +22,17 @@ client on loopback, lets them run, then asserts from the file logs that:
     server discovery and logs the host it found via loopback (name/port/
     version) -- the host is never actually joined (no assignment/gameplay in
     this mode; see below for which standard assertions still apply)
+  - (with -TestMaster) builds and runs tools/master-server as a third
+    process on loopback; the host announces to it and the second process
+    (also never joining) queries it and logs a master-sourced discovery
+    line -- proves the internet-wide server list integration end-to-end
+    without relying on LAN discovery (the host uses a non-default port)
 
 Requires: a built tree (windows-release preset), the stub install dir
 (fake-locomotion with Data\g1.DAT), allow_multiple_instances: true in the
 OpenLoco config, and the competitor fixture object for the company-grant
 outcome (scripts\gen_competitor_object.py). See KNOWLEDGEBASE.md § Headless.
+-TestMaster additionally requires Go (go.exe at the path hard-coded below).
 
 Exit code 0 = pass, 1 = fail.
 #>
@@ -86,8 +92,34 @@ param(
     # answers discoveryRequest packets; no special host flag is needed).
     # Needs enough time for the ~10s discovery window to complete; enforced
     # below (>= 15). Not meaningful combined with the other -Test* switches.
-    [switch]$TestDiscovery
+    [switch]$TestDiscovery,
+    # Exercise the master server integration end-to-end (docs/multiplayer.md
+    # § "Master server (phase 2 - design)"): builds tools/master-server (`go
+    # build`) and runs it as a THIRD process on loopback, on a high UDP port
+    # -- both the host and the second process are pointed at it via
+    # --master_server (a CLI override, not the shared config file - see
+    # CommandLine.h). The second process runs `--test_discover` (like
+    # -TestDiscovery) rather than joining. The host is started on a
+    # NON-default game port specifically so LAN discovery (which only ever
+    # probes kDefaultPort) genuinely cannot find it -- the only way the
+    # discover process can learn about it is via the master server, so a
+    # "[TEST] discovered server (master): ..." line unambiguously proves the
+    # master path (announce -> registry -> query -> masterServerList ->
+    # merge) works end-to-end rather than being masked by a simultaneous LAN
+    # discovery. Asserts: host log shows "Announcing to master server",
+    # discover process logs the master-sourced discovery line with the
+    # right name/port/version, the master-server.exe process itself stays
+    # alive for the whole run (stopped in this script's `finally` block, not
+    # inline), plus the standard zero-error/host+client-alive checks. Needs
+    # enough time for the ~10s discovery window plus process startup;
+    # enforced below (>= 20). Not meaningful combined with the other -Test*
+    # switches.
+    [switch]$TestMaster
 )
+
+# Only used when -TestMaster is passed. Not on PATH on this machine - see
+# KNOWLEDGEBASE.md § Master server (phase 2 service).
+$goExe = 'C:\Users\rikyt\AppData\Local\Programs\go\bin\go.exe'
 
 $ErrorActionPreference = 'Stop'
 
@@ -151,11 +183,11 @@ function Set-TitleSequenceFlag([string]$path)
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
-$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent, $TestDiscovery.IsPresent)
+$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent, $TestDiscovery.IsPresent, $TestMaster.IsPresent)
 $exclusiveSwitchCount = ($testHookFlags | Where-Object { $_ }).Count
 if ($exclusiveSwitchCount -gt 1)
 {
-    Fail 'TestRename, TestHostLoad, TestShutdown, TestReconnect and TestDiscovery are mutually exclusive -- run each in its own invocation'
+    Fail 'TestRename, TestHostLoad, TestShutdown, TestReconnect, TestDiscovery and TestMaster are mutually exclusive -- run each in its own invocation'
 }
 
 if ($TestHostLoad -and $RunSeconds -lt 50)
@@ -188,6 +220,11 @@ if ($TestDiscovery -and $RunSeconds -lt 15)
     Fail "-TestDiscovery's discovery window runs for ~10s; use -RunSeconds >= 15 (got $RunSeconds)"
 }
 
+if ($TestMaster -and $RunSeconds -lt 20)
+{
+    Fail "-TestMaster's discovery window runs for ~10s, plus master-server/host startup; use -RunSeconds >= 20 (got $RunSeconds)"
+}
+
 if ($Expect -eq '')
 {
     # own: freshly created company. coop: the host's (shared) company --
@@ -204,9 +241,45 @@ New-Item -ItemType Directory -Force $work | Out-Null
 $fixture = Join-Path $work 'fixture.sv5'
 $logDir = Join-Path $env:APPDATA 'OpenLoco\logs'
 
+# -TestMaster only: high, PID-derived loopback ports (some spread to reduce
+# collision risk between concurrent smoke-test runs on the same machine).
+# $hostGamePort is deliberately NOT kDefaultPort (11754) -- LAN discovery
+# only ever probes kDefaultPort, so a server on this port is unreachable via
+# LAN discovery, making a "(master)"-tagged discovery result unambiguous
+# proof of the master server path (see the -TestMaster switch doc above).
+$portOffset = $PID % 5000
+$masterUdpPort = 40000 + $portOffset
+$hostGamePort = 45000 + $portOffset
+$masterServerProc = $null
+
 Push-Location $BuildDir
 try
 {
+    if ($TestMaster)
+    {
+        if (-not (Test-Path $goExe)) { Fail "go.exe not found at $goExe (required for -TestMaster)" }
+
+        Write-Host 'Building master-server.exe...'
+        $masterServerSrcDir = Join-Path $PSScriptRoot '..\tools\master-server'
+        $masterServerExe = Join-Path $work 'master-server.exe'
+        Push-Location $masterServerSrcDir
+        try
+        {
+            & $goExe build -o $masterServerExe .
+            if ($LASTEXITCODE -ne 0) { Fail 'go build for master-server failed' }
+        }
+        finally
+        {
+            Pop-Location
+        }
+        if (-not (Test-Path $masterServerExe)) { Fail 'go build produced no master-server.exe' }
+
+        Write-Host "Starting master server on 127.0.0.1:$masterUdpPort..."
+        $masterServerProc = Start-Process $masterServerExe -ArgumentList @('-udp-port', $masterUdpPort, '-http-port', '0', '-ttl', '90s') -PassThru -NoNewWindow
+        Start-Sleep 1
+        if ($masterServerProc.HasExited) { Fail 'master-server process exited immediately after starting' }
+    }
+
     Write-Host "Generating fixture (seed $Seed)..."
     & $exe --locomotion_path $LocomotionPath gensave $fixture --seed $Seed | Out-Null
     if (-not (Test-Path $fixture)) { Fail 'gensave produced no fixture' }
@@ -237,6 +310,13 @@ try
     {
         $hostArgs += @('--test_shutdown_after', '25')
     }
+    if ($TestMaster)
+    {
+        # Non-default game port (see $hostGamePort above) plus the master
+        # server override, taking precedence over network.masterServer in
+        # the shared config file (CommandLine.h's --master_server).
+        $hostArgs += @('--port', $hostGamePort, '--master_server', "127.0.0.1:$masterUdpPort")
+    }
     $hostArgs += @('host', $fixture)
     $hostProc = Start-Process $exe -ArgumentList $hostArgs -PassThru -NoNewWindow
     Start-Sleep 8
@@ -244,11 +324,17 @@ try
     Write-Host 'Starting client...'
     $testRenameName = 'SyncTest'
     $clientArgs = @('--locomotion_path', $LocomotionPath, '--headless', '--log_levels', 'all')
-    if ($TestDiscovery)
+    if ($TestDiscovery -or $TestMaster)
     {
         # Instead of joining: probes for the host via LAN discovery
         # (broadcast + loopback) and logs what it finds. Never connects.
         $clientArgs += @('--test_discover')
+        if ($TestMaster)
+        {
+            # Same override as the host - queries the same master server
+            # instead of (or alongside) LAN probing.
+            $clientArgs += @('--master_server', "127.0.0.1:$masterUdpPort")
+        }
     }
     else
     {
@@ -269,24 +355,31 @@ try
 
     $hostAlive = -not $hostProc.HasExited
     $clientAlive = -not $clientProc.HasExited
+    $masterAlive = $true
+    if ($TestMaster) { $masterAlive = -not $masterServerProc.HasExited }
     Stop-Process -Id $hostProc.Id, $clientProc.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
 
     if (-not $hostAlive) { Fail 'host process died during the run' }
     if (-not $clientAlive) { Fail 'client process died during the run' }
+    if ($TestMaster -and -not $masterAlive) { Fail 'master server process died during the run' }
 
-    $logs = Get-ChildItem $logDir -File | Sort-Object LastWriteTime
+    # Sort by name: the filename embeds the creation timestamp, so the host
+    # (started first) always sorts first. LastWriteTime is unreliable here -
+    # it reflects whichever process happened to flush a log line last.
+    $logs = Get-ChildItem $logDir -File | Sort-Object Name
     if ($logs.Count -lt 2) { Fail "expected 2 log files, found $($logs.Count)" }
     $hostLog = Get-Content $logs[0].FullName
     $clientLog = Get-Content $logs[1].FullName
 
     $accepts = ($hostLog | Select-String 'Accepted new client').Count
-    if ($TestDiscovery)
+    if ($TestDiscovery -or $TestMaster)
     {
-        # The discovery process never sends a ConnectPacket at all -- it
-        # only probes and listens for discoveryResponse. Confirms discovery
-        # really does bypass the join flow entirely, not just skip logging.
-        if ($accepts -ne 0) { Fail "host accepted $accepts clients (expected 0 -- -TestDiscovery must never join)" }
+        # Neither the discovery process nor the master-integration discover
+        # process ever sends a ConnectPacket at all -- they only probe/query
+        # and listen for replies. Confirms discovery really does bypass the
+        # join flow entirely, not just skip logging.
+        if ($accepts -ne 0) { Fail "host accepted $accepts clients (expected 0 -- -TestDiscovery/-TestMaster must never join)" }
     }
     else
     {
@@ -294,9 +387,10 @@ try
     }
 
     # Gameplay-transition and join-assignment assertions are meaningless for
-    # -TestDiscovery: that process never joins, so it never receives a
-    # snapshot or a company assignment, and never transitions to gameplay.
-    if (-not $TestDiscovery)
+    # -TestDiscovery/-TestMaster: that process never joins, so it never
+    # receives a snapshot or a company assignment, and never transitions to
+    # gameplay.
+    if (-not $TestDiscovery -and -not $TestMaster)
     {
         if (($clientLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1)
         {
@@ -432,12 +526,32 @@ try
         # Network::resolveDisplayName), and it always binds to the default
         # port (11754) here since neither the host nor client override
         # --bind/--port in this script. maxPlayers is always kMaxRosterEntries
-        # (32); version must match this build's kNetworkVersion (7 as of
+        # (32); version must match this build's kNetworkVersion (8 as of
         # this writing -- bump alongside kNetworkVersion if it changes).
-        $discoveredMatch = $clientLog | Select-String "\[TEST\] discovered server: 'Player #0' 127\.0\.0\.1:11754 players=\d+/32 version=7" | Select-Object -First 1
+        $discoveredMatch = $clientLog | Select-String "\[TEST\] discovered server: 'Player #0' 127\.0\.0\.1:11754 players=\d+/32 version=8" | Select-Object -First 1
         if (-not $discoveredMatch)
         {
-            Fail "client never logged discovering the host (expected a '[TEST] discovered server: ''Player #0'' 127.0.0.1:11754 players=N/32 version=7' line)"
+            Fail "client never logged discovering the host (expected a '[TEST] discovered server: ''Player #0'' 127.0.0.1:11754 players=N/32 version=8' line)"
+        }
+    }
+
+    if ($TestMaster)
+    {
+        # The host must have logged that it's announcing to the configured
+        # master server (--master_server, resolved at listen() time).
+        if (($hostLog | Select-String 'Announcing to master server' -SimpleMatch).Count -lt 1)
+        {
+            Fail "host never logged 'Announcing to master server' (--master_server did not take effect)"
+        }
+
+        # The discover process must have learned about the host specifically
+        # via the MASTER server, not LAN discovery (which cannot find it --
+        # the host listens on $hostGamePort, a non-default port). name/port/
+        # version must match; version bumps alongside kNetworkVersion.
+        $discoveredMasterMatch = $clientLog | Select-String "\[TEST\] discovered server \(master\): 'Player #0' 127\.0\.0\.1:$hostGamePort players=\d+/32 version=8" | Select-Object -First 1
+        if (-not $discoveredMasterMatch)
+        {
+            Fail "client never logged discovering the host via the master server (expected a '[TEST] discovered server (master): ...' line naming 127.0.0.1:$hostGamePort version=8)"
         }
     }
 
@@ -454,11 +568,19 @@ try
     elseif ($TestShutdown) { $extraNote = ', graceful shutdown verified (no auto-reconnect)' }
     elseif ($TestReconnect) { $extraNote = ', auto-reconnect + seat reclaim verified' }
     elseif ($TestDiscovery) { $extraNote = ', LAN discovery verified (host found via loopback, never joined)' }
+    elseif ($TestMaster) { $extraNote = ', master server integration verified (announce -> query -> merge, via loopback)' }
     Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect$extraNote)" -ForegroundColor Green
     exit 0
 }
 finally
 {
     Pop-Location
+    # Stopped here (rather than inline with the host/client above) so it is
+    # torn down regardless of how the try block above exits, including an
+    # early Fail().
+    if ($masterServerProc -and -not $masterServerProc.HasExited)
+    {
+        Stop-Process -Id $masterServerProc.Id -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 }

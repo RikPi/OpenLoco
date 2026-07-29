@@ -310,6 +310,7 @@ namespace OpenLoco
                           .registerOption("--seed", 1)
                           .registerOption("--headless")
                           .registerOption("--join_policy", 1)
+                          .registerOption("--master_server", 1)
                           // Hidden test hooks, intentionally not in printHelp/--help.
                           .registerOption("--test_rename", 1)
                           .registerOption("--test_host_load", 1)
@@ -436,6 +437,11 @@ namespace OpenLoco
                 Logging::error("Unknown --join_policy '{}' (expected own, coop or spectator)", policy);
                 return {};
             }
+        }
+
+        if (parser.hasOption("--master_server"))
+        {
+            options.masterServer = std::string(parser.getArg("--master_server"));
         }
 
         if (parser.hasOption("--test_rename"))

@@ -9,7 +9,13 @@ namespace OpenLoco::Network::ServerDiscovery
     // roughly once a second to 255.255.255.255:kDefaultPort and
     // 127.0.0.1:kDefaultPort (see docs/multiplayer.md § LAN server
     // discovery), collecting discoveryResponse replies into a deduplicated
-    // (by endpoint) list. A no-op if already active.
+    // (by endpoint) list. When network.masterServer/--master_server is
+    // configured, also sends a masterQuery roughly every 2s to the master
+    // server and merges its masterServerList replies into the same list
+    // (docs/multiplayer.md § "Master server (phase 2 - design)"), tagged by
+    // source and deduplicated by endpoint - a LAN entry always wins over a
+    // master-sourced duplicate for the same endpoint. A no-op if already
+    // active.
     void begin();
 
     // Stops discovery and forgets everything found so far. A no-op if not

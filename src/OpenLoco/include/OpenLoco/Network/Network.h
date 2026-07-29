@@ -18,6 +18,10 @@ namespace OpenLoco::Network
     using port_t = uint16_t;
 
     constexpr port_t kDefaultPort = 11754;
+    // Default UDP port of the master server (tools/master-server's own
+    // -udp-port default), used when network.masterServer / --master_server
+    // names a host with no explicit port.
+    constexpr port_t kDefaultMasterServerPort = 11756;
     constexpr uint16_t kMaxPacketSize = 4096;
 
     // Version 2: game command arguments are serialized field-by-field
@@ -51,7 +55,20 @@ namespace OpenLoco::Network
     // request carries none) and self-describes its own version in the
     // response, so a browser can grey out incompatible servers rather than
     // this version bump itself gating whether a server can be found at all.
-    constexpr uint16_t kNetworkVersion = 7;
+    // Version 8: master server (phase 2, docs/multiplayer.md § "Master
+    // server (phase 2 - design)") - three more connectionless packet kinds
+    // (masterAnnounce, masterQuery, masterServerList, Packet.h), appended
+    // immediately after discoveryResponse, mirroring the standalone Go
+    // service in tools/master-server/ (protocol.go) field-for-field. A
+    // hosting server periodically announces itself to a configured master
+    // (network.masterServer / --master_server) and the in-game browser
+    // queries the master alongside its existing LAN probes, merging both
+    // into one list (deduped by endpoint, LAN wins - see
+    // Network/ServerDiscovery.cpp). Presentation-only, exactly like LAN
+    // discovery - never touches GameState or the game command stream, so
+    // this bump exists only for consistency with the versioning scheme (no
+    // wire-incompatible change to the session protocol itself).
+    constexpr uint16_t kNetworkVersion = 8;
 
     /**
      * Machine-local snapshot of one player/spectator, used to drive the
@@ -81,14 +98,17 @@ namespace OpenLoco::Network
     std::string resolveDisplayName(std::string_view raw, client_id_t id);
 
     /**
-     * Parses a free-form server address as typed by a player into a
-     * (host, port) pair, defaulting to kDefaultPort when no port is given.
-     * Accepts "host", "host:port" and "[ipv6]:port" (a bare IPv6 address
-     * with no port contains several colons and is passed through
-     * unchanged). Shared by every UI entry point that accepts such an
-     * address (the ServerBrowser "Join by address" prompt).
+     * Parses a free-form server address as typed by a player (or read from a
+     * config/CLI value) into a (host, port) pair, defaulting to `defaultPort`
+     * when no port is given (kDefaultPort unless the caller overrides it -
+     * e.g. network.masterServer/--master_server default to
+     * kDefaultMasterServerPort instead). Accepts "host", "host:port" and
+     * "[ipv6]:port" (a bare IPv6 address with no port contains several
+     * colons and is passed through unchanged). Shared by every entry point
+     * that accepts such an address (the ServerBrowser "Join by address"
+     * prompt, and the master server host/query endpoints).
      */
-    std::pair<std::string, port_t> parseServerAddress(std::string_view input);
+    std::pair<std::string, port_t> parseServerAddress(std::string_view input, port_t defaultPort = kDefaultPort);
 
     void openServer();
     bool joinServer(std::string_view host);
@@ -109,11 +129,23 @@ namespace OpenLoco::Network
      */
     std::vector<PlayerRosterEntry> getPlayerRoster();
 
+    // Where a DiscoveredServer entry came from - a LAN discoveryResponse or
+    // a master server's masterServerList entry (docs/multiplayer.md §
+    // "Master server (phase 2 - design)"). Used to dedupe entries that
+    // appear via both paths (the same endpoint answering a LAN broadcast/
+    // loopback probe and also being listed by the master): LAN always wins,
+    // since it is a direct, freshly-verified reply from the server itself.
+    enum class DiscoveredServerSource : uint8_t
+    {
+        lan,
+        master,
+    };
+
     /**
-     * A LAN server discovered via ServerDiscovery (see Network/
-     * ServerDiscovery.h), deduplicated by endpoint. Presentation data for
-     * the server browser UI only - never touches GameState or the game
-     * command stream.
+     * A server discovered either on the LAN or via the configured master
+     * server (see Network/ServerDiscovery.h), deduplicated by endpoint (LAN
+     * wins on conflict - see `source`). Presentation data for the server
+     * browser UI only - never touches GameState or the game command stream.
      */
     struct DiscoveredServer
     {
@@ -124,12 +156,15 @@ namespace OpenLoco::Network
         uint8_t playerCount{};
         uint8_t maxPlayers{};
         uint8_t joinPolicy{};
-        uint32_t lastSeen{}; // Platform::getTime() of the last discoveryResponse received
+        uint32_t lastSeen{}; // Platform::getTime() of the last response/list entry received
+        DiscoveredServerSource source{ DiscoveredServerSource::lan };
     };
 
     /**
      * Starts broadcasting discoveryRequest probes on the LAN roughly once a
-     * second and collecting discoveryResponse replies (see
+     * second and collecting discoveryResponse replies, and - when
+     * network.masterServer/--master_server is configured - also querying the
+     * master server roughly every 2s and merging its results in (see
      * Network/ServerDiscovery.h). Safe to call repeatedly - a no-op while
      * already active.
      */

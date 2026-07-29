@@ -46,6 +46,13 @@ namespace OpenLoco
         std::optional<uint32_t> seed{};
         bool headless{};
         JoinPolicy joinPolicy = JoinPolicy::ownCompany;
+        // Overrides network.masterServer (Config.h) for this process, same
+        // precedence as --bind/--port over their config equivalents. Useful
+        // for dedicated servers that want to announce/query a master server
+        // without touching the shared config file - see docs/multiplayer.md
+        // § "Master server (phase 2 - design)". Empty means "use the config
+        // value" (or "disabled" if that is also empty).
+        std::string masterServer;
         // Hidden headless test hook (deliberately omitted from --help): when
         // set on a joining client, drives a self-verifying client-issued
         // game command round-trip through the lockstep pipeline once the
