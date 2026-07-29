@@ -138,7 +138,7 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       headless host+join → asserts accept count, assignment outcome,
       gameplay transition, zero error/desync lines; exit code 0/1).
       Verified for `own` and `spectator` policies.
-- [x] (pending first green run) Wire the smoke test into a CI workflow job:
+- [x] Wire the smoke test into a CI workflow job:
       `.github/workflows/multiplayer-sync.yml`, a new standalone workflow
       (ci.yml untouched) triggered on push to `multiplayer` + manual dispatch.
       One `windows-2022` job mirrors ci.yml's Windows job (same `windows`
