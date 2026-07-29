@@ -739,6 +739,217 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   pieces read and write was already headless-verified by the pre-existing
   smoke test machinery, and is unchanged by this pass.
 
+## Reconnect implementation notes (network version 6)
+
+- Wire additions (`Packet.h`): `ConnectPacket` gained `uint64_t token{}` (0 =
+  fresh join); `CompanyAssignmentPacket` gained `uint64_t token{}` (echoed on
+  every send site - coop/spectator/resend-existing in
+  `onReceiveStateRequestPacket`, success/spectator-fallback in
+  `runGameCommands` - five sites total); `RosterEntry` gained `uint8_t
+  reserved{}`. The presentation-level `Network::PlayerRosterEntry` (`Network.h`)
+  gained a matching `bool reserved{}`, converted in both directions by
+  `toWirePacket`/`fromWirePacket` (roster overloads, `Network.cpp`).
+- Session tokens are generated server-side only, in a file-local
+  `generateSessionToken()` (`NetworkServer.cpp`) using `std::random_device`
+  directly (two 32-bit draws combined into a `uint64_t`, remapping an
+  all-zero result to 1 since 0 is the wire's "fresh join" sentinel). This is
+  deliberately non-deterministic - the task/design doc are explicit that
+  session bookkeeping is not game state and determinism rules don't apply to
+  it. Contrast with the synced `GameState.rng` (`Core::Prng`), which must
+  never be touched by anything reconnect-related.
+- `NetworkServer::Client` gained a `token` field (assigned via
+  `generateSessionToken()` for a fresh join, or restored from a reclaimed
+  seat). A new `NetworkServer::ReservedSeat` (`NetworkServer.h`) holds
+  `{token, id, name, company, assignmentResolved}` and is stored in a new
+  `_reservedSeats` vector, kept for the whole session's lifetime (no expiry
+  policy - matches the design doc's V1 scope).
+- Seat reservation: `NetworkServer::removedTimedOutClients()` now moves a
+  timed-out client's fields into a `ReservedSeat` (logging `Reserved seat for
+  '<name>' (company N) pending reconnect`) instead of just erasing it. This
+  never touches `GameState`, the replicated command stream, or the
+  human-company mask - the company simply keeps existing with an empty seat,
+  which was already the correct, deterministic behaviour on every peer
+  before this change (disconnect never cleared the human-company mask).
+- Reclaim on connect: `NetworkServer::createNewClient()` checks a non-zero
+  `ConnectPacket::token` against `_reservedSeats` **before** falling through
+  to the normal fresh-join code (version check still happens first, as
+  before). A match restores `id`/`name`/`company`/`assignmentResolved`/
+  `token` onto a brand new `Client` (with a brand new `NetworkConnection` -
+  the reconnecting socket has a different local port, so the server cannot
+  recognise it by endpoint, only by the token in its `ConnectPacket`), erases
+  the reserved seat, sends the ordinary success `ConnectResponsePacket`, and
+  logs `Client '<name>' reclaimed its reserved seat (company N)`. No new
+  branching was needed in `onReceiveStateRequestPacket`: it already resends
+  the existing assignment whenever `client.assignmentResolved == true`
+  (added for desync resyncs), and a reclaimed client's restored
+  `assignmentResolved` flag drives that same branch. An unrecognised/stale
+  token falls through to the ordinary fresh-join path with a log line,
+  rather than rejecting the connection outright - a garbage token can never
+  strand a client.
+- **Deviation from the design doc's literal wording**: the doc says reclaim
+  "skips join policy" unconditionally. In this implementation it skips join
+  policy only when the reserved seat's `assignmentResolved` was `true` (the
+  overwhelmingly common case - a client that had already joined before it
+  timed out). If a client disconnects *before* ever being assigned a company
+  (a narrow window during the initial join), its reserved
+  `assignmentResolved` is `false`, and reclaiming it naturally re-enters the
+  ordinary join-policy switch in `onReceiveStateRequestPacket` on reconnect -
+  via the exact same restored-field mechanism, not a new special case. This
+  was a deliberate choice to reuse the existing, already-correct machinery
+  rather than add a parallel code path, and is arguably more correct for
+  that edge case (an unassigned client reconnecting should still get
+  assigned).
+- Roster: `NetworkServer::buildRoster()` appends one `PlayerRosterEntry` per
+  reserved seat (`reserved = true`) after the live clients. Rendered as
+  `"<name> (disconnected)"` in two places: `Ui/Windows/PlayerList.cpp`'s
+  `draw()` and `NetworkClient::receiveRosterUpdatePacket`'s log summary line
+  (both checked ahead of the existing spectator/company branches).
+- Client auto-retry state machine and where it lives (the "hardest part" per
+  the task): `NetworkClient` (`NetworkClient.h`/`.cpp`) tracks three bools
+  purely to answer `shouldAutoRetry()`:
+  - `_eligibleForAutoRetry` - set only in `onUpdate()`'s `hasTimedOut()`
+    branch, and only when `_status` was already `connected` or `resyncing`
+    (an *established* connection, not a still-transferring initial join,
+    which is excluded per the design doc - "not a failed initial connect").
+  - `_isReconnectAttempt` - set by `setReconnectToken()`, called by the
+    facade before `connect()` on a NetworkClient created specifically to
+    retry; any close of such an instance is retry-worthy (bounded by the
+    facade's attempt cap), covering both "still unreachable" (connect-phase
+    timeout) and any other close reason for that attempt.
+  - `_suppressAutoRetry` - always wins over both of the above. Set in
+    `receiveServerClosingPacket` (graceful shutdown must never auto-retry -
+    this is what the `-TestShutdown` smoke assertion checks for), in
+    `onCancel()`'s connecting-state branch (user-initiated cancel), and in
+    `receiveConnectionResponsePacket`'s rejection branch (e.g. a version
+    mismatch will never resolve itself by retrying).
+  - `shouldAutoRetry()` = `!_suppressAutoRetry && (_eligibleForAutoRetry ||
+    _isReconnectAttempt)`.
+  - `_token`/`getToken()`/`setReconnectToken()`: `_token` is updated on
+    every `CompanyAssignmentPacket` (even a spectator gets one - it's what
+    lets *any* client reconnect, not just company owners) and sent on every
+    outgoing `ConnectPacket` in `sendConnectPacket()`.
+- **Facade-owned retry state** (`Network.cpp`), the architectural answer to
+  "`NetworkClient` is destroyed by `Network::close()` on timeout - where does
+  retry state live": a `NetworkClient` object cannot remember anything across
+  its own destruction, so the facade - which outlives any individual
+  instance - owns it instead:
+  - `_joinHost`/`_joinPort` (plain statics): the address most recently passed
+    to `joinServer()`. Kept for the whole session (cleared only by a real
+    `close()`), since they identify "the server we're joined to" independent
+    of any one reconnect episode - unlike the token/attempt count, they must
+    not reset just because an episode ended.
+  - `ReconnectState _reconnect { active, token, attempts, nextAttemptTime }`:
+    per-episode bookkeeping. `Network::tick()` is the state machine driver
+    (called every frame from `OpenLoco.cpp`'s main loop, same place the
+    pre-existing test hooks are driven from, well outside `GameScene::tick()`
+    - see § Lockstep architecture facts): after `serverOrClient->update()`,
+    it first checks whether a reconnect episode just succeeded (`_mode ==
+    client && _client->getStatus() == connected`), clearing `_reconnect`
+    if so (logging `Reconnected successfully`) so a later, unrelated
+    disconnect starts a fresh episode at attempt 1. Then, if the
+    client/server `isClosed()`: a retry-worthy close
+    (`_client->shouldAutoRetry()`) captures `_client->getToken()` into
+    `_reconnect.token`, destroys the client (`_client = nullptr`), and either
+    gives up (`giveUpReconnecting()`, if the attempt cap - 5 - was already
+    reached) or schedules the next attempt 5s later; any other close falls
+    through to the pre-existing `close()`. When `_mode == none` and
+    `_reconnect.active` and the schedule has elapsed, `attemptReconnect()`
+    creates a fresh `NetworkClient`, calls `setReconnectToken(_reconnect.token)`
+    **before** `connect(_joinHost, _joinPort)` (ordering matters -
+    `sendConnectPacket()` reads `_token` at the end of `connect()`), logs
+    `Reconnecting (attempt N)...`, and shows/updates progress via the
+    `NetworkStatus` window (`showReconnectStatus()` - opens the window if not
+    already present, e.g. because gameplay was showing with no status window
+    up, otherwise just updates its text/close-callback; the close button
+    wires to `giveUpReconnecting`, letting a user cancel mid-retry).
+    `giveUpReconnecting()` closes the status window, requests the title
+    scene, and calls the ordinary `close()` (which also clears
+    `_joinHost`/`_reconnect` - the session really is over at that point) -
+    i.e. the pre-existing return-to-title behaviour, unchanged.
+- Determinism: nothing above ever touches `GameState`, `CompanyManager`'s
+  human-company mask, or the game command stream - reconnection is pure
+  session/connection bookkeeping (server-side `Client`/`ReservedSeat`,
+  client-side retry bools/token, facade-side endpoint/attempt bookkeeping).
+  The one non-deterministic operation (`std::random_device` token
+  generation) happens only on the server, only at accept/reclaim time, and
+  its result is never fed into anything replicated.
+
+## Reconnect test hook
+
+- `--test_blackhole <start>,<duration>` (`CommandLine.h`/`.cpp`): a hidden,
+  **client-side** test-only CLI option (same hidden-hook convention as
+  `--test_rename`/`--test_host_load`/`--test_shutdown_after` - a single
+  string arg, parsed here as `"<start>,<duration>"` in seconds, deliberately
+  absent from `printHelp`). Once armed, `NetworkClient::onReceivePacket`
+  (the per-packet callback from the receive thread, overridden from
+  `NetworkBase`) silently returns without delegating to
+  `_serverConnection->receivePacket(packet)` for every packet received while
+  `isBlackholed()` is true.
+- **Why this produces a REAL, two-sided timeout, not a scripted fake**:
+  `NetworkConnection::receivePacket()` is what stamps
+  `_timeOfLastReceivedPacket` (used by `hasTimedOut()`) *and* sends the ACK
+  back to the sender. Skipping it entirely means: (a) this client's own
+  `hasTimedOut()` goes true ~15s after blackhole start (its normal 15s
+  `kConnectionTimeout`, `NetworkConnection.cpp`), driving the existing
+  `onUpdate()` path that sets `_eligibleForAutoRetry` and calls `close()`;
+  and (b) the client also stops sending anything back to the server (no ACKs
+  for the server's frequent pings, which is the only regular traffic in a
+  quiet headless test), so the *server's* per-client `NetworkConnection` also
+  goes 15s without receiving anything and independently times out via
+  `NetworkServer::removedTimedOutClients()`. Both timeouts are genuine
+  consequences of a real (simulated) packet-loss window, not a scripted
+  "pretend to disconnect" call - this is what the task required
+  ("a REAL timeout + reconnect, not a scripted fake").
+- The blackhole window is defined in absolute wall-clock terms, not relative
+  to any one `NetworkClient` instance: `testBlackholeReferenceTime()`
+  (`NetworkClient.cpp`, anonymous namespace) caches `Platform::getTime()` the
+  first time it's called (a Meyer's-singleton-style `static` local), which in
+  practice is this process's very first `connect()` call. Every subsequent
+  reconnect attempt constructs a brand new `NetworkClient`, but
+  `isBlackholed()` always measures elapsed time against this one cached
+  reference, so the window fires exactly once across the whole run
+  regardless of how many `NetworkClient` objects come and go - critical,
+  since `Platform::getTime()` itself (`timeGetTime()` on Windows) is system
+  uptime, not process- or object-relative, but nothing previously cached
+  "when did this session's outage-testing clock start".
+- `scripts\run_sync_smoke_test.ps1` gained `-TestReconnect`: passes
+  `--test_blackhole 20,20` to the **client** (not the host), requires
+  `-JoinPolicy own`/`coop` (need a company to compare before/after) and
+  `-RunSeconds >= 80`. Asserts, in order: a `Reconnecting (attempt` line in
+  the client log; 2+ `Assigned company N` lines with the post-outage one
+  (found by `LineNumber` relative to the `Reconnecting` line, same technique
+  as the pre-existing `-TestHostLoad` assertion) reporting the SAME `N` as
+  the first; host log lines `Reserved seat for` and `reclaimed its reserved
+  seat`; and the standard zero `[ERR]`/desync check across the whole run.
+  `-TestShutdown` gained one more assertion in the same run: zero
+  `Reconnecting (attempt` lines (a graceful shutdown must never auto-retry -
+  this is what actually exercises `_suppressAutoRetry`'s effect end-to-end).
+- Timing choice (blackhole 20s→40s relative to client connect, run 90s):
+  chosen so the client's own 15s timeout fires mid-window (~35s, comfortably
+  inside [20,40)) and the server's independent 15s timeout fires at
+  essentially the same wall-clock time (both clocks start from "last real
+  traffic", which stopped at the same moment for both sides) - so by the
+  time the facade's first retry attempt fires (~5s after the client detects
+  its own timeout, i.e. ~40s), the server has already reserved the seat.
+  Even if a retry attempt happens to race the exact blackhole-end boundary,
+  the next attempt (5s later) lands well past it - the design tolerates a
+  fully sequential worst case since attempts are bounded (5) and spaced (5s)
+  well within the 90s run window.
+- Verified end-to-end headless (own policy, 90s run): **first attempt
+  succeeded** in the observed run - host log: `Client timed out: Player #1`
+  → `Reserved seat for 'Player #1' (company 1) pending reconnect` →
+  `Client 'Player #1' reclaimed its reserved seat (company 1)`; client log:
+  `Connection with server timed out` → `Disconnected from server` →
+  `Reconnecting (attempt 1)...` → `Assigned company 1` (identical to the
+  pre-outage assignment) → `Reconnected successfully` → `Scene transition:
+  gameplay -> gameplay` (a legitimate no-op scene transition, same
+  observation as the pre-existing `-TestHostLoad` note about
+  `gameplay -> gameplay`); zero `[ERR]`/desync lines in either log for the
+  whole 90s run. Regression battery: build clean (`App` + `OpenLocoTests`),
+  `ctest -C Release` 145/145, `-TestRename` (own and coop), spectator
+  (no test hook), and `-TestHostLoad` smoke tests all still PASS;
+  `-TestShutdown` PASSes including the new no-auto-reconnect assertion.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the

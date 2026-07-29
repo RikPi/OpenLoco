@@ -42,6 +42,56 @@ const std::vector<PlayerRosterEntry>& NetworkClient::getRoster() const
     return _roster;
 }
 
+void NetworkClient::setReconnectToken(uint64_t token)
+{
+    _token = token;
+    _isReconnectAttempt = true;
+}
+
+uint64_t NetworkClient::getToken() const
+{
+    return _token;
+}
+
+bool NetworkClient::shouldAutoRetry() const
+{
+    if (_suppressAutoRetry)
+    {
+        return false;
+    }
+    return _eligibleForAutoRetry || _isReconnectAttempt;
+}
+
+namespace
+{
+    // Cached on first use: a stable reference point for --test_blackhole
+    // that survives across NetworkClient instances (a fresh object is
+    // created for every reconnect attempt, but the blackhole window is
+    // meant to represent a single real-world outage, not one per attempt).
+    // Platform::getTime() is already a monotonic clock independent of any
+    // particular object's lifetime (system uptime, not process-relative) -
+    // what's missing is remembering *when this client first started
+    // connecting*, which this caches once and reuses forever after.
+    uint32_t testBlackholeReferenceTime()
+    {
+        static uint32_t startTime = Platform::getTime();
+        return startTime;
+    }
+}
+
+bool NetworkClient::isBlackholed() const
+{
+    const auto& options = getCommandLineOptions();
+    if (!options.testBlackhole.has_value())
+    {
+        return false;
+    }
+
+    auto [start, duration] = *options.testBlackhole;
+    auto elapsedSec = static_cast<int32_t>((Platform::getTime() - testBlackholeReferenceTime()) / 1000);
+    return elapsedSec >= start && elapsedSec < start + duration;
+}
+
 // Headless test hook (--test_rename). Called from onUpdate(), i.e. the
 // main-thread update path outside GameScene::tick(), so any command issued
 // here goes through the normal doCommand -> network queue path exactly like
@@ -221,6 +271,17 @@ void NetworkClient::onUpdate()
         if (hasTimedOut())
         {
             Logging::info("Connection with server timed out");
+
+            // Only an already-established connection is eligible for the
+            // facade's automatic reconnect loop (Network.cpp::tick()) - a
+            // timeout while still transferring the initial snapshot is not
+            // meaningfully different from "failed to connect" and is left
+            // to the existing return-to-title behaviour, per
+            // docs/multiplayer.md § Reconnect.
+            if (_status == NetworkClientStatus::connected || _status == NetworkClientStatus::resyncing)
+            {
+                _eligibleForAutoRetry = true;
+            }
             close();
         }
         else
@@ -269,6 +330,17 @@ bool NetworkClient::hasTimedOut() const
 
 void NetworkClient::onReceivePacket([[maybe_unused]] IUdpSocket& socket, std::unique_ptr<INetworkEndpoint> endpoint, const Packet& packet)
 {
+    if (isBlackholed())
+    {
+        // --test_blackhole: simulate a genuine network outage by silently
+        // discarding every incoming packet (including ACKs and pings), so
+        // this client's own NetworkConnection::hasTimedOut() (and, since we
+        // therefore also stop sending anything back, the server's mirror of
+        // the same check) fire for real. See KNOWLEDGEBASE.md § Reconnect
+        // test hook.
+        return;
+    }
+
     // TODO do we really need the check, it is possible but unlikely
     //      for something else to hijack the UDP client port
     if (_serverEndpoint != nullptr && endpoint->equals(*_serverEndpoint))
@@ -283,6 +355,8 @@ void NetworkClient::onCancel()
     {
         case NetworkClientStatus::connecting:
             Logging::info("Connecting to server cancelled");
+            // User-initiated: never auto-retry a cancelled connect attempt.
+            _suppressAutoRetry = true;
             close();
             break;
         default:
@@ -350,6 +424,10 @@ void NetworkClient::sendConnectPacket()
     ConnectPacket packet;
     std::strncpy(packet.name, config.preferredOwnerName.c_str(), sizeof(packet.name));
     packet.version = kNetworkVersion;
+    // 0 (the default until a CompanyAssignmentPacket sets it) means "fresh
+    // join"; a non-zero value asks the server to reclaim a reserved seat
+    // (docs/multiplayer.md § Reconnect).
+    packet.token = _token;
     _serverConnection->sendPacket(packet);
 }
 
@@ -379,6 +457,9 @@ void NetworkClient::receiveConnectionResponsePacket(const ConnectResponsePacket&
         // Skip the generic "failed to connect" status from the connecting-state
         // close path; the rejection reason above is more useful
         _status = NetworkClientStatus::closed;
+        // An explicit rejection (e.g. version mismatch) will never resolve
+        // itself by retrying - never auto-retry this.
+        _suppressAutoRetry = true;
         close();
     }
 }
@@ -460,6 +541,11 @@ void NetworkClient::receiveChatMessagePacket(const ReceiveChatMessage& packet)
 
 void NetworkClient::receiveCompanyAssignmentPacket(const CompanyAssignmentPacket& packet)
 {
+    // Remember the session token regardless of assignment outcome (even a
+    // spectator gets one) - it's what lets a later reconnect reclaim this
+    // exact seat (docs/multiplayer.md § Reconnect).
+    _token = packet.token;
+
     if (packet.company == CompanyId::null)
     {
         Logging::info("Server did not assign a company; remaining a spectator");
@@ -500,7 +586,11 @@ void NetworkClient::receiveRosterUpdatePacket(const RosterUpdatePacket& packet)
             summary += ", ";
         }
         const auto& entry = _roster[i];
-        if (entry.company == CompanyId::null)
+        if (entry.reserved)
+        {
+            summary += fmt::format("'{}' (disconnected)", entry.name);
+        }
+        else if (entry.company == CompanyId::null)
         {
             summary += fmt::format("'{}' spectator", entry.name);
         }
@@ -516,6 +606,11 @@ void NetworkClient::receiveRosterUpdatePacket(const RosterUpdatePacket& packet)
 
 void NetworkClient::receiveServerClosingPacket([[maybe_unused]] const ServerClosingPacket& packet)
 {
+    // A graceful shutdown is intentional and permanent for this session -
+    // never auto-retry it (see docs/multiplayer.md § Reconnect and the
+    // -TestShutdown smoke assertion that no "Reconnecting" line appears).
+    _suppressAutoRetry = true;
+
     Logging::info("Server is shutting down");
     Ui::Windows::Chat::addMessage("Server", "Server is shutting down");
 

@@ -18,6 +18,7 @@
 #include <OpenLoco/Core/BinaryStream.h>
 #include <OpenLoco/Core/FileStream.h>
 #include <OpenLoco/Core/MemoryStream.h>
+#include <OpenLoco/Platform/Platform.h>
 #include <OpenLoco/Utility/String.hpp>
 #include <algorithm>
 #include <cassert>
@@ -64,6 +65,7 @@ namespace OpenLoco::Network
             auto nameLength = std::min(src.name.size(), kMaxRosterNameLength);
             dst.nameLength = static_cast<uint8_t>(nameLength);
             std::memcpy(dst.name, src.name.data(), nameLength);
+            dst.reserved = src.reserved ? 1 : 0;
         }
         return roster.size() <= kMaxRosterEntries;
     }
@@ -81,6 +83,7 @@ namespace OpenLoco::Network
             entry.company = src.company;
             auto nameLength = std::min<size_t>(src.nameLength, kMaxRosterNameLength);
             entry.name.assign(src.name, nameLength);
+            entry.reserved = src.reserved != 0;
             roster.push_back(std::move(entry));
         }
         return roster;
@@ -154,6 +157,34 @@ namespace OpenLoco::Network
     static std::unique_ptr<NetworkServer> _server;
     static std::unique_ptr<NetworkClient> _client;
 
+    // --- Reconnect (docs/multiplayer.md § Reconnect) ------------------------
+    //
+    // NetworkClient is destroyed whenever its connection is lost (see close()
+    // below) - it cannot remember anything across that destruction. The
+    // {endpoint, token, attempt count} needed to retry therefore has to live
+    // one level up, in this facade, which outlives any individual
+    // NetworkClient instance. This is the "facade-owned retry state" referred
+    // to in the design doc.
+    //
+    // _joinHost/_joinPort are the address most recently passed to
+    // joinServer() - kept for the whole session (cleared only by a real
+    // close()), since they identify "the server we're joined to" independent
+    // of any particular reconnect episode.
+    static std::string _joinHost;
+    static port_t _joinPort{};
+
+    constexpr int kMaxReconnectAttempts = 5;
+    constexpr uint32_t kReconnectIntervalMs = 5000;
+
+    struct ReconnectState
+    {
+        bool active{};             // a retry episode is in progress (the NetworkClient object is temporarily gone)
+        uint64_t token{};          // session token to reclaim the same seat
+        int attempts{};            // attempts already made this episode
+        uint32_t nextAttemptTime{}; // Platform::getTime() of the next attempt
+    };
+    static ReconnectState _reconnect;
+
     static NetworkBase* getServerOrClient()
     {
         switch (_mode)
@@ -165,6 +196,63 @@ namespace OpenLoco::Network
             default:
                 return nullptr;
         }
+    }
+
+    // Ends the reconnect episode (successfully or not) and hands control back
+    // to the ordinary "not networked" state, exactly as if the player had
+    // manually disconnected - the existing return-to-title behaviour.
+    static void giveUpReconnecting()
+    {
+        Logging::error("Reconnect failed after {} attempt(s); giving up", _reconnect.attempts);
+        Ui::Windows::NetworkStatus::close();
+        SceneManager::requestScene(SceneManager::SceneId::title);
+        close();
+    }
+
+    // Shows/refreshes reconnect progress in the status window. A fresh
+    // episode has no window open (gameplay was showing); a later attempt
+    // during the same episode reuses whatever window is already up (e.g. one
+    // left open by a prior failed attempt, or by an in-flight resync).
+    static void showReconnectStatus(const std::string& text)
+    {
+        if (Ui::WindowManager::find(Ui::WindowType::networkStatus) != nullptr)
+        {
+            Ui::Windows::NetworkStatus::setText(text, &giveUpReconnecting);
+        }
+        else
+        {
+            Ui::Windows::NetworkStatus::open(text, &giveUpReconnecting);
+        }
+    }
+
+    // Creates a brand new NetworkClient bound to the previous session token
+    // and points it at the same endpoint. This is a genuinely fresh
+    // connection attempt (new socket, new local port) - the server cannot
+    // recognise it by endpoint, only by the token carried in its
+    // ConnectPacket (see NetworkServer::createNewClient's reclaim branch).
+    static void attemptReconnect()
+    {
+        _reconnect.attempts++;
+        Logging::info("Reconnecting (attempt {})...", _reconnect.attempts);
+        showReconnectStatus(fmt::format("Reconnecting (attempt {}/{})...", _reconnect.attempts, kMaxReconnectAttempts));
+
+        try
+        {
+            auto client = std::make_unique<NetworkClient>();
+            client->setReconnectToken(_reconnect.token);
+            client->connect(_joinHost, _joinPort);
+            _client = std::move(client);
+            _mode = NetworkMode::client;
+        }
+        catch (...)
+        {
+            // Could not even start the attempt (e.g. socket creation
+            // failure) - stay in the "no client" state and try again once
+            // the interval elapses, same as a timed-out attempt would.
+            _client = nullptr;
+        }
+
+        _reconnect.nextAttemptTime = Platform::getTime() + kReconnectIntervalMs;
     }
 
     void openServer()
@@ -216,6 +304,13 @@ namespace OpenLoco::Network
             _client = std::make_unique<NetworkClient>();
             _client->connect(host, port);
             _mode = NetworkMode::client;
+
+            // Remember the endpoint for a possible future auto-reconnect
+            // (see tick()); this is a brand new session, so any leftover
+            // reconnect bookkeeping from an earlier one is stale.
+            _joinHost = std::string(host);
+            _joinPort = port;
+            _reconnect = {};
             return true;
         }
         catch (...)
@@ -230,6 +325,9 @@ namespace OpenLoco::Network
         _server = nullptr;
         _client = nullptr;
         _mode = NetworkMode::none;
+        _reconnect = {};
+        _joinHost.clear();
+        _joinPort = 0;
     }
 
     void tick()
@@ -238,10 +336,57 @@ namespace OpenLoco::Network
         if (serverOrClient != nullptr)
         {
             serverOrClient->update();
+
+            // A reconnect episode ends the moment the new connection is
+            // fully re-established (fresh state transfer complete) - clear
+            // the bookkeeping so a later, unrelated disconnect starts a new
+            // episode at attempt 1 rather than continuing this one's count.
+            if (_reconnect.active && _mode == NetworkMode::client && _client->getStatus() == NetworkClientStatus::connected)
+            {
+                Logging::info("Reconnected successfully");
+                _reconnect = {};
+            }
+
             if (serverOrClient->isClosed())
             {
-                close();
+                if (_mode == NetworkMode::client && _client->shouldAutoRetry())
+                {
+                    // Either the first time an established connection has
+                    // timed out (not a failed initial connect, not a
+                    // graceful server shutdown - see
+                    // NetworkClient::shouldAutoRetry), or a previous retry
+                    // attempt that itself failed to (re)connect. Capture the
+                    // token before the object goes away, then destroy it -
+                    // this is the one place a lost NetworkClient's identity
+                    // must survive its own destruction, which is exactly
+                    // what _reconnect exists for.
+                    if (!_reconnect.active)
+                    {
+                        _reconnect.active = true;
+                        _reconnect.attempts = 0;
+                    }
+                    _reconnect.token = _client->getToken();
+                    _client = nullptr;
+                    _mode = NetworkMode::none;
+
+                    if (_reconnect.attempts >= kMaxReconnectAttempts)
+                    {
+                        giveUpReconnecting();
+                    }
+                    else
+                    {
+                        _reconnect.nextAttemptTime = Platform::getTime() + kReconnectIntervalMs;
+                    }
+                }
+                else
+                {
+                    close();
+                }
             }
+        }
+        else if (_reconnect.active && Platform::getTime() >= _reconnect.nextAttemptTime)
+        {
+            attemptReconnect();
         }
     }
 

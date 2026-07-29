@@ -27,6 +27,26 @@ namespace OpenLoco::Network
         // existing one so the client can restore its controlling id after
         // applying the fresh snapshot.
         bool assignmentResolved{};
+
+        // Session token (docs/multiplayer.md § Reconnect), generated with a
+        // non-deterministic source (see generateSessionToken in
+        // NetworkServer.cpp) - this is session bookkeeping, not game state,
+        // so the usual determinism rules do not apply to it. Sent to the
+        // client alongside every CompanyAssignmentPacket; a later
+        // ConnectPacket presenting the same token reclaims this seat.
+        uint64_t token{};
+    };
+
+    // A timed-out client's identity/company, kept so it can reclaim its seat
+    // later instead of being forgotten (docs/multiplayer.md § Reconnect). V1
+    // keeps these for the whole session's lifetime - no expiry policy yet.
+    struct ReservedSeat
+    {
+        uint64_t token{};
+        client_id_t id{};
+        std::string name;
+        CompanyId company{ CompanyId::null };
+        bool assignmentResolved{};
     };
 
     struct ChatMessage
@@ -57,6 +77,11 @@ namespace OpenLoco::Network
 
         std::vector<std::unique_ptr<NetworkConnection>> _incomingConnections;
         std::vector<std::unique_ptr<Client>> _clients;
+        // Reconnect (docs/multiplayer.md § Reconnect): seats belonging to
+        // timed-out clients, kept for the session's lifetime pending a
+        // reconnect with a matching token. See removedTimedOutClients() and
+        // createNewClient()'s reclaim branch.
+        std::vector<ReservedSeat> _reservedSeats;
         std::queue<ChatMessage> _chatMessageQueue;
         client_id_t _nextClientId = 1;
         uint32_t _lastPing{};

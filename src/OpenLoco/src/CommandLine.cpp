@@ -313,7 +313,8 @@ namespace OpenLoco
                           // Hidden test hooks, intentionally not in printHelp/--help.
                           .registerOption("--test_rename", 1)
                           .registerOption("--test_host_load", 1)
-                          .registerOption("--test_shutdown_after", 1);
+                          .registerOption("--test_shutdown_after", 1)
+                          .registerOption("--test_blackhole", 1);
 
         if (!parser.parse())
         {
@@ -449,6 +450,28 @@ namespace OpenLoco
         if (parser.hasOption("--test_shutdown_after"))
         {
             options.testShutdownAfter = parser.getArg<int32_t>("--test_shutdown_after");
+        }
+
+        if (parser.hasOption("--test_blackhole"))
+        {
+            auto arg = parser.getArg("--test_blackhole");
+            auto commaPos = arg.find(',');
+            if (commaPos == std::string_view::npos)
+            {
+                Logging::error("Invalid --test_blackhole value '{}': expected '<start>,<duration>'", arg);
+                return {};
+            }
+            try
+            {
+                auto start = std::stoi(std::string(arg.substr(0, commaPos)));
+                auto duration = std::stoi(std::string(arg.substr(commaPos + 1)));
+                options.testBlackhole = std::make_pair(start, duration);
+            }
+            catch (const std::exception&)
+            {
+                Logging::error("Invalid --test_blackhole value '{}': expected '<start>,<duration>'", arg);
+                return {};
+            }
         }
 
         return options;

@@ -14,7 +14,10 @@ client on loopback, lets them run, then asserts from the file logs that:
   - (with -TestHostLoad) the host's mid-session reload of its own fixture
     triggered a full client resync ending in a fresh company assignment
   - (with -TestShutdown) the host's graceful close was announced to the
-    client, which returned to title cleanly (no timeout)
+    client, which returned to title cleanly (no timeout, no auto-reconnect)
+  - (with -TestReconnect) a simulated network outage (client-side blackhole)
+    caused a genuine two-sided timeout; the client auto-reconnected with its
+    saved session token and reclaimed the SAME company it had before
 
 Requires: a built tree (windows-release preset), the stub install dir
 (fake-locomotion with Data\g1.DAT), allow_multiple_instances: true in the
@@ -54,7 +57,22 @@ param(
     # session (but keeps running as single-player, does not exit) ~25s in.
     # Needs RunSeconds comfortably past 25s; enforced below (>= 35). Not
     # meaningful combined with -TestRename or -TestHostLoad.
-    [switch]$TestShutdown
+    [switch]$TestShutdown,
+    # Exercise the client auto-reconnect flow headlessly: passes
+    # `--test_blackhole 20,20` to the CLIENT, which silently discards every
+    # incoming packet from t=20s to t=40s (relative to its first connect()
+    # call), a genuine simulated network outage -- both the client (its own
+    # 15s NetworkConnection timeout) and the server (which stops hearing
+    # anything back from the client, since a blackholed client also stops
+    # ACKing/sending) independently time the connection out around t=35s.
+    # The client then auto-retries against the same endpoint with its saved
+    # session token every ~5s (up to 5 attempts); once the blackhole window
+    # closes (t=40s) a retry succeeds and the server reclaims the reserved
+    # seat. Needs RunSeconds comfortably past all of this; enforced below
+    # (>= 80). Requires -JoinPolicy own or coop (need a company assignment to
+    # compare before/after). Not meaningful combined with the other -Test*
+    # switches.
+    [switch]$TestReconnect
 )
 
 $ErrorActionPreference = 'Stop'
@@ -119,11 +137,11 @@ function Set-TitleSequenceFlag([string]$path)
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
-$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent)
+$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent)
 $exclusiveSwitchCount = ($testHookFlags | Where-Object { $_ }).Count
 if ($exclusiveSwitchCount -gt 1)
 {
-    Fail 'TestRename, TestHostLoad and TestShutdown are mutually exclusive -- run each in its own invocation'
+    Fail 'TestRename, TestHostLoad, TestShutdown and TestReconnect are mutually exclusive -- run each in its own invocation'
 }
 
 if ($TestHostLoad -and $RunSeconds -lt 50)
@@ -139,6 +157,16 @@ if ($TestHostLoad -and $JoinPolicy -eq 'spectator')
 if ($TestShutdown -and $RunSeconds -lt 35)
 {
     Fail "-TestShutdown fires at 25s and needs time to observe the client's reaction; use -RunSeconds >= 35 (got $RunSeconds)"
+}
+
+if ($TestReconnect -and $RunSeconds -lt 80)
+{
+    Fail "-TestReconnect's blackhole runs 20s-40s and needs time for both sides to time out, retry and resync afterwards; use -RunSeconds >= 80 (got $RunSeconds)"
+}
+
+if ($TestReconnect -and $JoinPolicy -eq 'spectator')
+{
+    Fail '-TestReconnect requires -JoinPolicy own or coop -- a spectator client never gets an "Assigned company" line to compare before/after'
 }
 
 if ($Expect -eq '')
@@ -200,6 +228,10 @@ try
     if ($TestRename)
     {
         $clientArgs += @('--test_rename', $testRenameName)
+    }
+    if ($TestReconnect)
+    {
+        $clientArgs += @('--test_blackhole', '20,20')
     }
     $clientProc = Start-Process $exe -ArgumentList $clientArgs -PassThru -NoNewWindow
 
@@ -290,6 +322,62 @@ try
         {
             Fail "client log contains 'timed out' -- the shutdown should be graceful, not a connection timeout"
         }
+
+        # A graceful shutdown must never trigger the auto-reconnect loop
+        # (docs/multiplayer.md § Reconnect / NetworkClient::
+        # receiveServerClosingPacket sets _suppressAutoRetry before closing).
+        if (($clientLog | Select-String 'Reconnecting \(attempt').Count -gt 0)
+        {
+            Fail "client log contains 'Reconnecting (attempt' -- a graceful server shutdown must not trigger auto-reconnect"
+        }
+    }
+
+    if ($TestReconnect)
+    {
+        # Client side: the blackhole must have caused a real timeout and at
+        # least one genuine auto-retry attempt.
+        $reconnectMatch = $clientLog | Select-String 'Reconnecting \(attempt' | Select-Object -First 1
+        if (-not $reconnectMatch)
+        {
+            Fail "client never logged 'Reconnecting (attempt' (the blackhole did not cause an established-connection timeout, or auto-retry did not trigger)"
+        }
+
+        # There must be an "Assigned company N" line before the outage and
+        # another one afterwards, for the SAME N -- proving the reconnect
+        # reclaimed the original seat/company rather than joining fresh.
+        $assignedMatches = @($clientLog | Select-String 'Assigned company (\d+)')
+        if ($assignedMatches.Count -lt 2)
+        {
+            Fail "expected 2+ 'Assigned company' lines in client log (initial join + post-reconnect), found $($assignedMatches.Count)"
+        }
+
+        $initialCompany = $assignedMatches[0].Matches[0].Groups[1].Value
+        $postReconnect = $assignedMatches | Where-Object { $_.LineNumber -gt $reconnectMatch.LineNumber } | Select-Object -First 1
+        if (-not $postReconnect)
+        {
+            Fail "no 'Assigned company' line found after the 'Reconnecting' line (reconnect never completed a fresh state transfer)"
+        }
+        if ($postReconnect.Matches[0].Groups[1].Value -ne $initialCompany)
+        {
+            Fail "post-reconnect company ($($postReconnect.Matches[0].Groups[1].Value)) differs from the original ($initialCompany) -- the client rejoined as a different seat instead of reclaiming its own"
+        }
+
+        # Host side: the timeout must have reserved the seat, and the
+        # reconnect must have reclaimed it (not been treated as a fresh
+        # join).
+        if (($hostLog | Select-String 'Reserved seat for' -SimpleMatch).Count -lt 1)
+        {
+            Fail "host never logged reserving a seat for the timed-out client (removedTimedOutClients did not fire, or did not reserve)"
+        }
+        if (($hostLog | Select-String 'reclaimed its reserved seat' -SimpleMatch).Count -lt 1)
+        {
+            Fail "host never logged the client reclaiming its reserved seat (reconnect was treated as a fresh join, or never arrived)"
+        }
+
+        # Reclaiming must not go through the fresh-join path: the earlier,
+        # unconditional "$accepts -ne 1" check above already proves the host
+        # only ever saw one "Accepted new client" for the whole run, i.e. the
+        # reconnect above was a reclaim, not a second fresh join.
     }
 
     $badLines = @($hostLog + $clientLog | Select-String '\[ERR\]|[Dd]esync')
@@ -302,7 +390,8 @@ try
     $extraNote = ''
     if ($TestRename -and $Expect -eq 'company') { $extraNote = ', rename round trip verified' }
     elseif ($TestHostLoad) { $extraNote = ', host-load resync verified' }
-    elseif ($TestShutdown) { $extraNote = ', graceful shutdown verified' }
+    elseif ($TestShutdown) { $extraNote = ', graceful shutdown verified (no auto-reconnect)' }
+    elseif ($TestReconnect) { $extraNote = ', auto-reconnect + seat reclaim verified' }
     Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect$extraNote)" -ForegroundColor Green
     exit 0
 }

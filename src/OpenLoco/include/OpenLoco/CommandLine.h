@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace OpenLoco
@@ -70,6 +71,16 @@ namespace OpenLoco
         // test-shutdown hook and KNOWLEDGEBASE.md § Graceful shutdown test
         // hook.
         std::optional<int32_t> testShutdownAfter{};
+        // Hidden headless test hook (deliberately omitted from --help),
+        // client-side, formatted "<start>,<duration>" (seconds): makes
+        // NetworkClient::onReceivePacket silently discard every incoming
+        // packet for <duration> seconds starting <start> seconds after this
+        // process's first connect() call, simulating a genuine network
+        // outage (both this client and the server independently time each
+        // other out via their normal 15s connection timeout) rather than a
+        // scripted fake disconnect. Drives the reconnect smoke test. See
+        // KNOWLEDGEBASE.md § Reconnect test hook.
+        std::optional<std::pair<int32_t, int32_t>> testBlackhole{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

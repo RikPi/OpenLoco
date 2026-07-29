@@ -89,9 +89,21 @@ namespace OpenLoco::Ui::Windows::PlayerList
         auto point = Point(self.x + 8, self.y + 20);
         for (const auto& entry : Network::getPlayerRoster())
         {
-            auto line = entry.company == CompanyId::null
-                ? fmt::format("{} - spectator", entry.name)
-                : fmt::format("{} - company {}", entry.name, static_cast<uint32_t>(entry.company));
+            std::string line;
+            if (entry.reserved)
+            {
+                // Timed-out client with its seat/company held for reconnect
+                // (docs/multiplayer.md § Reconnect) - not currently connected.
+                line = fmt::format("{} (disconnected)", entry.name);
+            }
+            else if (entry.company == CompanyId::null)
+            {
+                line = fmt::format("{} - spectator", entry.name);
+            }
+            else
+            {
+                line = fmt::format("{} - company {}", entry.name, static_cast<uint32_t>(entry.company));
+            }
             tr.drawString(point, Colour::black, line.c_str());
             point.y += kLineHeight;
         }

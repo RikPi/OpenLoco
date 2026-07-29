@@ -80,6 +80,13 @@ namespace OpenLoco::Network
 
         uint16_t version{};
         char name[32]{};
+        // Session token from a previous CompanyAssignmentPacket (see
+        // docs/multiplayer.md § Reconnect). 0 means "fresh join" - the
+        // server never issues 0 as a real token (see
+        // NetworkServer::generateSessionToken). A non-zero value matching a
+        // reserved seat reclaims that seat's identity/company instead of
+        // running the normal join policy.
+        uint64_t token{};
     };
 
     enum class ConnectionResult
@@ -201,6 +208,11 @@ namespace OpenLoco::Network
         size_t size() const { return sizeof(CompanyAssignmentPacket); }
 
         CompanyId company{ CompanyId::null };
+        // Session token the client should remember and present (in a future
+        // ConnectPacket) to reclaim this seat if its connection is lost. Sent
+        // on every assignment (including coop/spectator/resend paths), not
+        // just the first one - see docs/multiplayer.md § Reconnect.
+        uint64_t token{};
     };
 
     // Cap on a roster entry's display name, and on the number of entries a
@@ -221,6 +233,11 @@ namespace OpenLoco::Network
         CompanyId company{ CompanyId::null };
         uint8_t nameLength{};
         char name[kMaxRosterNameLength]{};
+        // Set when this entry is a reserved seat (a client that timed out
+        // but kept its identity/company reserved pending reconnect) rather
+        // than an actively connected client - see docs/multiplayer.md §
+        // Reconnect. Rendered as "<name> (disconnected)".
+        uint8_t reserved{};
     };
 
     /**

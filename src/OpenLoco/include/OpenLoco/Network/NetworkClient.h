@@ -37,6 +37,22 @@ namespace OpenLoco::Network
         uint32_t _serverTick;
         std::list<QueuedGameCommand> _receivedGameCommands;
 
+        // Reconnect (docs/multiplayer.md § Reconnect). _token is the session
+        // token the server issued (echoed on every CompanyAssignmentPacket);
+        // 0 until one has been received. It is sent on every ConnectPacket
+        // so a lost-and-regained connection can reclaim its seat.
+        //
+        // The three flags below exist purely to answer shouldAutoRetry():
+        // whether the facade (Network.cpp) should try to reconnect this
+        // client's session with a fresh NetworkClient instance once this one
+        // is destroyed. _suppressAutoRetry always wins - it marks a close
+        // that must never be retried (graceful server shutdown, a
+        // user-initiated cancel, or an explicit connection rejection).
+        uint64_t _token{};
+        bool _isReconnectAttempt{}; // this instance was created by the facade specifically to retry a lost connection
+        bool _eligibleForAutoRetry{}; // an established (connected/resyncing) connection just timed out
+        bool _suppressAutoRetry{};
+
         // Latest roster snapshot received from the server (RosterUpdatePacket).
         // Presentation data only - never fed back into GameState/game commands.
         std::vector<PlayerRosterEntry> _roster;
@@ -88,6 +104,14 @@ namespace OpenLoco::Network
         void onCancel();
         void processReceivedPackets();
         bool hasTimedOut() const;
+        // --test_blackhole <start>,<duration> (CommandLine.h): hidden
+        // headless test hook that makes onReceivePacket() silently discard
+        // everything for <duration> seconds starting <start> seconds after
+        // this process's first NetworkClient::connect() call, simulating a
+        // genuine network outage (both this client and the server
+        // independently time each other out) rather than a scripted fake.
+        // See KNOWLEDGEBASE.md § Reconnect test hook.
+        bool isBlackholed() const;
         void onReceivePacketFromServer(const Packet& packet);
         void processFullState(std::span<uint8_t const> data);
         void updateLocalTick();
@@ -126,6 +150,22 @@ namespace OpenLoco::Network
         NetworkClientStatus getStatus() const;
         uint32_t getLocalTick() const;
         const std::vector<PlayerRosterEntry>& getRoster() const;
+
+        // Reconnect (docs/multiplayer.md § Reconnect). Must be called before
+        // connect() to take effect (it only affects the ConnectPacket
+        // connect() sends). getToken() lets the facade (Network.cpp) recover
+        // the latest server-issued token before this object is destroyed.
+        void setReconnectToken(uint64_t token);
+        uint64_t getToken() const;
+
+        // Whether the facade should create a new NetworkClient and retry
+        // this session once this (now-closed) instance is destroyed. True
+        // when either: an established connection just timed out
+        // (_eligibleForAutoRetry), or this instance was itself a retry
+        // attempt that failed to (re)establish (_isReconnectAttempt) -
+        // unless _suppressAutoRetry overrides both (graceful shutdown,
+        // user cancel, explicit rejection).
+        bool shouldAutoRetry() const;
 
         void connect(std::string_view host, port_t port);
         void sendChatMessage(std::string_view message) override;

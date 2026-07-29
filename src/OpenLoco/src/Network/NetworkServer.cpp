@@ -14,6 +14,7 @@
 #include <OpenLoco/Core/MemoryStream.h>
 #include <OpenLoco/Platform/Platform.h>
 #include <algorithm>
+#include <random>
 #include <span>
 
 using namespace OpenLoco;
@@ -21,6 +22,23 @@ using namespace OpenLoco::Network;
 using namespace OpenLoco::Diagnostics;
 
 constexpr uint32_t kPingInterval = 30;
+
+namespace
+{
+    // Session token generation (docs/multiplayer.md § Reconnect). This is
+    // pure session bookkeeping - never part of GameState or the game command
+    // stream - so it deliberately uses a non-deterministic source
+    // (std::random_device) rather than the synced game PRNG; determinism
+    // rules only apply to the replicated simulation, not to this. 0 is
+    // reserved on the wire to mean "fresh join" (see ConnectPacket), so it is
+    // never handed out as a real token.
+    uint64_t generateSessionToken()
+    {
+        static std::random_device rd;
+        uint64_t token = (static_cast<uint64_t>(rd()) << 32) | static_cast<uint64_t>(rd());
+        return token == 0 ? 1 : token;
+    }
+}
 
 NetworkServer::~NetworkServer()
 {
@@ -133,6 +151,47 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
         return;
     }
 
+    // Reclaim path (docs/multiplayer.md § Reconnect): a non-zero token that
+    // matches a reserved seat means this is a returning client, not a fresh
+    // join. Restore its identity/company/assignment from the reserved seat
+    // and skip the fresh-join path (join policy included) entirely - the
+    // normal snapshot transfer + assignment resend flow that already runs
+    // for `client.assignmentResolved == true` in onReceiveStateRequestPacket
+    // does the rest, exactly like a desync resync does for a client that
+    // never disconnected.
+    if (packet.token != 0)
+    {
+        auto it = std::find_if(_reservedSeats.begin(), _reservedSeats.end(),
+            [&](const ReservedSeat& seat) { return seat.token == packet.token; });
+        if (it != _reservedSeats.end())
+        {
+            auto newClient = std::make_unique<Client>();
+            newClient->id = it->id;
+            newClient->connection = std::move(conn);
+            newClient->name = it->name;
+            newClient->company = it->company;
+            newClient->assignmentResolved = it->assignmentResolved;
+            newClient->token = it->token;
+
+            _reservedSeats.erase(it);
+
+            ConnectResponsePacket response;
+            response.result = ConnectionResult::success;
+            newClient->connection->sendPacket(response);
+
+            Logging::info("Client '{}' reclaimed its reserved seat (company {})", newClient->name, static_cast<uint32_t>(newClient->company));
+
+            _clients.push_back(std::move(newClient));
+            broadcastRosterUpdate();
+            return;
+        }
+
+        // Unknown/expired/already-reclaimed token - fall through and treat
+        // this as an ordinary fresh join rather than failing outright, so a
+        // stale token can never permanently strand a client.
+        Logging::info("Client presented an unrecognised reconnect token; treating as a fresh join");
+    }
+
     auto newClient = std::make_unique<Client>();
     newClient->id = _nextClientId++;
     newClient->connection = std::move(conn);
@@ -140,6 +199,7 @@ void NetworkServer::createNewClient(std::unique_ptr<NetworkConnection> conn, con
     // buffer; falls back to "Player #<id>" if it's empty after trimming
     // (fixes blank-padding in "Accepted new client"/assignment log lines).
     newClient->name = resolveDisplayName(std::string_view(packet.name, sizeof(packet.name)), newClient->id);
+    newClient->token = generateSessionToken();
     _clients.push_back(std::move(newClient));
 
     auto& newClientPtr = *_clients.back();
@@ -243,6 +303,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
     {
         CompanyAssignmentPacket packet;
         packet.company = client.company;
+        packet.token = client.token;
         client.connection->sendPacket(packet);
         return;
     }
@@ -267,6 +328,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
             client.assignmentResolved = true;
             CompanyAssignmentPacket packet;
             packet.company = client.company;
+            packet.token = client.token;
             client.connection->sendPacket(packet);
             broadcastRosterUpdate();
             break;
@@ -277,6 +339,7 @@ void NetworkServer::onReceiveStateRequestPacket(Client& client, const RequestSta
             client.assignmentResolved = true;
             CompanyAssignmentPacket packet;
             packet.company = CompanyId::null;
+            packet.token = client.token;
             client.connection->sendPacket(packet);
             broadcastRosterUpdate();
             break;
@@ -456,6 +519,23 @@ void NetworkServer::removedTimedOutClients()
         if (client->connection->hasTimedOut())
         {
             Logging::info("Client timed out: {}", client->name);
+
+            // Reserve the seat (docs/multiplayer.md § Reconnect) instead of
+            // forgetting the client outright, so a later ConnectPacket with
+            // this token reclaims its id/name/company/assignment. Kept for
+            // the session's lifetime (V1 - no expiry policy yet). This never
+            // touches GameState or the human-company mask - the company
+            // simply keeps existing with an empty seat, which is already the
+            // correct/deterministic behaviour on every peer.
+            ReservedSeat seat;
+            seat.token = client->token;
+            seat.id = client->id;
+            seat.name = client->name;
+            seat.company = client->company;
+            seat.assignmentResolved = client->assignmentResolved;
+            Logging::info("Reserved seat for '{}' (company {}) pending reconnect", seat.name, static_cast<uint32_t>(seat.company));
+            _reservedSeats.push_back(std::move(seat));
+
             it = _clients.erase(it);
             anyRemoved = true;
         }
@@ -570,7 +650,7 @@ void NetworkServer::sendChatMessage(std::string_view message)
 std::vector<PlayerRosterEntry> NetworkServer::buildRoster() const
 {
     std::vector<PlayerRosterEntry> roster;
-    roster.reserve(_clients.size() + 1);
+    roster.reserve(_clients.size() + _reservedSeats.size() + 1);
 
     // client_id_t 0 is reserved for the host (see sendChatMessage's sender).
     PlayerRosterEntry host;
@@ -585,6 +665,18 @@ std::vector<PlayerRosterEntry> NetworkServer::buildRoster() const
         entry.id = client->id;
         entry.company = client->company;
         entry.name = client->name; // already resolved/trimmed at connect time
+        roster.push_back(std::move(entry));
+    }
+
+    // Reserved seats (docs/multiplayer.md § Reconnect) - shown as
+    // "<name> (disconnected)" by the UI/log formatters that read `reserved`.
+    for (auto& seat : _reservedSeats)
+    {
+        PlayerRosterEntry entry;
+        entry.id = seat.id;
+        entry.company = seat.company;
+        entry.name = seat.name;
+        entry.reserved = true;
         roster.push_back(std::move(entry));
     }
     return roster;
@@ -660,6 +752,7 @@ void NetworkServer::runGameCommands()
 
                     CompanyAssignmentPacket packet;
                     packet.company = assignedCompany;
+                    packet.token = client->token;
                     client->connection->sendPacket(packet);
                 }
                 else
@@ -669,6 +762,7 @@ void NetworkServer::runGameCommands()
                     // Tell the client explicitly so it knows it is spectating
                     CompanyAssignmentPacket packet;
                     packet.company = CompanyId::null;
+                    packet.token = client->token;
                     client->connection->sendPacket(packet);
                 }
 

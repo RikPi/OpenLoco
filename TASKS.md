@@ -227,6 +227,83 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       state reload`; client logs `Host loaded a new game; resyncing` then a
       fresh `Assigned company 1`; zero `[ERR]`/desync lines for the rest of
       the run; build clean; ctest 145/145.
+- [x] **Reconnect** (design: `docs/multiplayer.md` § Reconnect). Network
+      version bumped to 6. A client that loses its connection can rejoin the
+      same session and reclaim its company instead of being treated as a new
+      player:
+      - Session token: the server generates a random (`std::random_device`,
+        non-deterministic by design - session bookkeeping, not game state)
+        `uint64_t` per accepted client, sent alongside every
+        `CompanyAssignmentPacket` (new `token` field). `ConnectPacket` grows
+        a matching `token` field (0 = fresh join).
+      - Seat reservation: `NetworkServer::removedTimedOutClients()` now moves
+        a timed-out client's `{token, id, name, company, assignmentResolved}`
+        into a new `_reservedSeats` list instead of dropping it (kept for the
+        session's lifetime - no expiry policy yet). Never touches
+        `GameState`/the human-company mask.
+      - Reclaim on connect: `NetworkServer::createNewClient()` checks a
+        non-zero `ConnectPacket::token` against `_reservedSeats` first; a
+        match restores the client's identity/company/assignment and skips
+        the fresh-join path (join policy included) entirely - the existing
+        `assignmentResolved == true` branch in `onReceiveStateRequestPacket`
+        (already used by desync resyncs) resends the snapshot + assignment,
+        which is all a reclaim needs.
+      - Roster: `RosterEntry`/`PlayerRosterEntry` gained a `reserved` flag;
+        `NetworkServer::buildRoster()` includes reserved seats, rendered as
+        "`<name> (disconnected)`" by `PlayerList.cpp` and the client's roster
+        log summary.
+      - Client auto-retry: `NetworkClient` tracks `_eligibleForAutoRetry`
+        (set only when an already-`connected`/`resyncing` connection times
+        out - not a failed initial connect), `_isReconnectAttempt` (this
+        instance is itself a retry) and `_suppressAutoRetry` (graceful
+        `serverClosing`, user cancel, or explicit rejection - always wins).
+        Since `Network::close()` destroys the `NetworkClient` object on any
+        disconnect, the retry loop's state - `{host, port, token, attempts}`
+        - lives one level up, in the `Network.cpp` facade (`_joinHost`/
+        `_joinPort`/`_reconnect`), and survives across the destroyed/
+        recreated `NetworkClient` instances. `Network::tick()` recognises a
+        retry-worthy close via `NetworkClient::shouldAutoRetry()`, tears the
+        client down, and schedules the next attempt (up to 5, ~5s apart,
+        logged `Reconnecting (attempt N)...`, surfaced via the
+        `NetworkStatus` window); giving up returns to the title scene (the
+        existing behaviour). A successful reconnect (fresh `NetworkClient`,
+        same token) re-triggers the ordinary snapshot+assignment-resend flow
+        and clears the retry bookkeeping.
+      - New hidden client-side test hook `--test_blackhole <start>,<duration>`
+        makes `NetworkClient::onReceivePacket` silently discard every
+        incoming packet for a real time window, producing a genuine
+        two-sided timeout (both peers stop hearing from each other) instead
+        of a scripted fake. `scripts\run_sync_smoke_test.ps1` gained
+        `-TestReconnect` (blackhole 20s-40s, `-RunSeconds >= 80`); asserts a
+        `Reconnecting (attempt` line, a second `Assigned company N` line
+        with the SAME `N` as before the outage, host `Reserved seat for`
+        and `reclaimed its reserved seat` lines, and the usual zero-error/
+        desync check. `-TestShutdown` gained an added assertion that no
+        `Reconnecting (attempt` line appears (graceful shutdown must never
+        auto-retry).
+      - Verified end-to-end headless (own policy, 90s run, real blackhole):
+        host logs `Client timed out` -> `Reserved seat for 'Player #1'
+        (company 1) pending reconnect` -> `Client 'Player #1' reclaimed its
+        reserved seat (company 1)`; client logs `Connection with server
+        timed out` -> `Disconnected from server` -> `Reconnecting (attempt
+        1)...` -> `Assigned company 1` (same company as the original
+        assignment) -> `Reconnected successfully` -> `Scene transition:
+        gameplay -> gameplay`; zero `[ERR]`/desync lines in either log.
+        Regressions: build clean (App + OpenLocoTests), ctest 145/145,
+        `-TestRename` (own + coop), spectator, and `-TestHostLoad` smoke
+        tests all still PASS; `-TestShutdown` PASSes with the new
+        no-auto-reconnect assertion. See KNOWLEDGEBASE.md § Reconnect
+        implementation notes and § Reconnect test hook.
+      - Deviation from the design doc's literal wording: reclaim "skips join
+        policy" only in the common case (the seat's `assignmentResolved` was
+        already `true` when reserved). If a client disconnects before ever
+        being assigned, its reserved `assignmentResolved` is `false`, and a
+        reclaim naturally re-enters the ordinary join-policy switch on
+        reconnect (via the same restored-field mechanism) rather than being
+        specially skipped - a deliberate reuse of existing code rather than a
+        new branch, and arguably the more correct behaviour for that edge
+        case. Host migration remains explicitly out of scope (per the design
+        doc) and was not addressed.
 
 ## Backlog
 
@@ -306,7 +383,9 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       resolves the sender's display name via `Network::getPlayerRoster()`,
       falling back to "Player #N" only if the roster doesn't have the
       sender yet.
-- [ ] Reconnect / host migration
+- [x] Reconnect - done, see Milestone 2 above and KNOWLEDGEBASE.md § Reconnect
+      implementation notes / § Reconnect test hook. Host migration remains
+      explicitly out of scope per the design doc and is not addressed.
 - [ ] Lobby & server browser
 - [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
 - [x] Graceful shutdown for `--headless`: hidden `--test_shutdown_after

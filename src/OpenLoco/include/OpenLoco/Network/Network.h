@@ -33,7 +33,15 @@ namespace OpenLoco::Network
     // every client discard its state and re-request the snapshot; join
     // assignments are re-resolved against the newly loaded world (while
     // desync resyncs now deliberately keep the existing assignment).
-    constexpr uint16_t kNetworkVersion = 5;
+    // Version 6: reconnect (docs/multiplayer.md § Reconnect) - ConnectPacket
+    // carries a session token (0 = fresh join) and CompanyAssignmentPacket
+    // echoes the server-issued token back; a client that times out has its
+    // seat (token/id/name/company/assignmentResolved) reserved rather than
+    // forgotten, and a later ConnectPacket with a matching token reclaims it
+    // (skipping join policy - the existing assignmentResolved snapshot/
+    // resend path does the rest); RosterEntry gained a `reserved` flag so
+    // the roster can show reserved seats as "<name> (disconnected)".
+    constexpr uint16_t kNetworkVersion = 6;
 
     /**
      * Machine-local snapshot of one player/spectator, used to drive the
@@ -47,6 +55,10 @@ namespace OpenLoco::Network
         client_id_t id{};
         CompanyId company{ CompanyId::null };
         std::string name;
+        // True for a reserved (disconnected, reconnect-pending) seat rather
+        // than an actively connected client - see docs/multiplayer.md §
+        // Reconnect.
+        bool reserved{};
     };
 
     /**
