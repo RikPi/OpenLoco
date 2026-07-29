@@ -950,6 +950,184 @@ Hard-won facts about the codebase and environment. Companion to `TASKS.md`
   (no test hook), and `-TestHostLoad` smoke tests all still PASS;
   `-TestShutdown` PASSes including the new no-auto-reconnect assertion.
 
+## LAN server discovery (network version 7)
+
+- Wire (`Packet.h`): `PacketKind::discoveryRequest`/`discoveryResponse`
+  appended at the end of the enum (never renumber existing values).
+  `DiscoveryRequestPacket { uint32_t cookie }`; `DiscoveryResponsePacket
+  { cookie (echoed), version, port, playerCount, maxPlayers
+  (kMaxRosterEntries), joinPolicy (OpenLoco::JoinPolicy as a plain byte -
+  avoids a CommandLine.h include in Packet.h), nameLength, name[
+  kMaxRosterNameLength] }` (reuses the roster's existing name-length
+  constant rather than inventing a new one). Both are answered/sent
+  completely outside `NetworkConnection` - no sequence numbers that mean
+  anything, no acks, no resend-on-loss (a lost reply is simply not seen this
+  probe round; the client just asks again ~1s later).
+- **Version tolerance is load-bearing, not just documentation**:
+  `NetworkServer::createNewClient` rejects a version-mismatched `ConnectPacket`
+  outright, but `onReceiveDiscoveryRequestPacket` never checks the
+  requester's version at all (the request struct has no version field to
+  check) - it always answers, and stamps its own `kNetworkVersion` in the
+  reply. This is what lets `ServerBrowser` grey out an incompatible server
+  instead of it simply never appearing in the list.
+- **Server-side handling location**: added as a new branch in
+  `NetworkServer::onReceivePacket`, in the `client == nullptr` arm right
+  alongside the existing connect-packet handling (same reason: the sender is
+  never an established `Client`). Unlike connect, the discovery branch never
+  creates a `NetworkConnection`/`Client`/`_incomingConnections` entry - it
+  calls `onReceiveDiscoveryRequestPacket(socket, *endpoint, request)`, which
+  builds a `DiscoveryResponsePacket`, hand-frames it into a `Packet` (kind +
+  sequence=0 + dataSize + payload, the exact layout
+  `NetworkConnection::sendPacket` produces), and calls
+  `IUdpSocket::sendData(endpoint, ...)` directly - the same primitive
+  `NetworkConnection` itself ultimately calls, just without any of its
+  reliability bookkeeping.
+- `NetworkServer` gained a `_listenPort` member (set in `listen()`) purely so
+  the discovery response can report the server's *real* game port -
+  necessary because probes are only ever sent to `kDefaultPort` (see below),
+  which might not be the port the server is actually listening on if it were
+  configured otherwise (config/`--port`).
+- **Socket broadcast finding**: `Socket.cpp`'s `UdpSocket::createSocket()`
+  already had a `setsockopt(..., SO_BROADCAST, ...)` call, dormant
+  (commented out) since day one. Uncommenting it (enabling broadcast
+  unconditionally on every UDP socket this codebase creates) was the
+  smallest viable change - cheaper than adding a `setBroadcast()` method or
+  a discovery-only socket construction path, and harmless for the
+  pre-existing server/client game-connection sockets, which never send to a
+  broadcast destination anyway.
+- **Client-side reuses `NetworkBase`, but is not a `NetworkClient`**:
+  `Network/ServerDiscovery.cpp`'s internal `DiscoveryClient` derives from
+  `NetworkBase` purely to get its background receive-thread plumbing
+  (`beginReceivePacketLoop()`/the `onReceivePacket` virtual/`close()`) for
+  free - it never sends a `ConnectPacket`, has no session, and overrides
+  `onUpdate()` (probe timer + expiry) and `onReceivePacket()` (collect
+  responses) instead of anything connection-oriented.
+  `sendChatMessage` is pure virtual on `NetworkBase` and stubbed empty here.
+- **Probe targets**: `255.255.255.255:kDefaultPort` (LAN broadcast) and
+  `127.0.0.1:kDefaultPort` (loopback - broadcast usually does not traverse
+  the loopback interface, so same-machine testing needs the separate
+  explicit target) - both hard-coded to `kDefaultPort` specifically, not
+  whatever the browsing client happens to be configured with. This means a
+  server configured to a non-default port is invisible to broadcast/loopback
+  discovery (still reachable via "Join by address"); documented as a known
+  limitation in both `docs/multiplayer.md` and the code comments rather than
+  solved (would need scanning a port range or a smarter protocol, judged
+  out of scope for phase 1).
+- **Lazy-socket-creation race, pre-existing and reused deliberately**:
+  `UdpSocket`'s underlying OS socket is created lazily, on the first
+  `sendData()` call (see `Socket::createUdp()`'s `UdpSocket` never touching
+  a real fd until then). `DiscoveryClient::start()` pushes the socket into
+  `_sockets` and calls `beginReceivePacketLoop()` *before* the first
+  `sendProbe()` runs, meaning `receiveData()` can be invoked on the
+  background thread with an as-yet-`INVALID_SOCKET` for a brief window -
+  this fails softly (`recvfrom` errors, treated as `NetworkReadPacket::noData`)
+  rather than crashing, and is the exact same lazy-creation race
+  `NetworkClient::connect()` already has (its own `beginReceivePacketLoop()`
+  happens before `sendConnectPacket()`) - not a new problem, verified safe by
+  the pre-existing production code already relying on it.
+- **Cross-thread `_servers` mutation**: `onReceivePacket` (background receive
+  thread) and `onUpdate` (main thread, via `ServerDiscovery::tick()` from
+  `Network::tick()`) both mutate the same `std::vector<DiscoveredServer>`.
+  Unlike several other places in this codebase that already tolerate
+  unsynchronized cross-thread access to shared state (e.g. `NetworkServer::
+  _clients`, read by `findClient` on the receive thread with no lock against
+  the main thread's `push_back`s), a `std::mutex` was added here
+  specifically because it was cheap and the state is genuinely written from
+  both threads every update - not fixing the pre-existing pattern elsewhere,
+  just not repeating it somewhere a lock was easy to add.
+- **Facade wiring location**: `Network::tick()` now unconditionally calls
+  `ServerDiscovery::tick()` (and the `--test_discover` hook, see below)
+  *before* the existing mode-dispatch logic, specifically so discovery can
+  run with `_mode == NetworkMode::none` - e.g. browsing servers from the
+  title screen with no `NetworkClient`/`NetworkServer` open at all.
+- **Ordering bug hit and fixed while wiring the facade**: the `--test_discover`
+  hook's state (`_testDiscoverActive`/`_testDiscoverDone`/etc.) and its
+  driver function were first written directly below `getPlayerRoster()`/
+  `beginServerDiscovery()` et al., i.e. *after* `tick()` in the file - which
+  doesn't compile (`error C3861: identifier not found`), since C++ has no
+  whole-translation-unit function hoisting; only the free functions already
+  prototyped in `Network.h` (like `beginServerDiscovery` itself) can be
+  called before their point of definition in the .cpp. Fixed by moving the
+  whole anonymous-namespace block to just above `openServer()`, ahead of
+  `tick()`'s call site.
+- Shared parsing helper: `Network::parseServerAddress(std::string_view)`
+  (`Network.h`/`.cpp`) is `TitleMenu::multiplayerConnect`'s old host/port
+  parsing logic moved verbatim (accepts `host`, `host:port`, `[ipv6]:port`) -
+  now used by `ServerBrowser`'s "Join by address" prompt; `TitleMenu` no
+  longer has its own copy (the whole raw-address-prompt flow moved into the
+  browser, see below).
+- UI: `Ui/Windows/ServerBrowser.cpp` (`WindowType::serverBrowser = 63`, the
+  first free slot past `playerList`), registered/facaded/CMakeLists-wired
+  exactly like `PlayerList.cpp`. The clickable row list uses a real
+  `Widgets::ScrollView` (trimmed-down version of `CompanyList.cpp`'s
+  idiom: `getScrollSize`/`scrollMouseDown`/`drawScroll`, row index computed
+  as `y / kRowHeight`, no headers/tabs/sorting) rather than `PlayerList`'s
+  fixed non-scrolling panel, since rows here are clickable and the codebase's
+  established mechanism for "click a specific row" is the scroll widget's
+  `onScrollMouseDown(Window&, x, y, scrollIndex)` callback, not per-row
+  widgets. A file-static `std::vector<Network::DiscoveredServer> _servers`
+  snapshot (refreshed in `onUpdate()`, mirroring `Chat.cpp`'s `_history`
+  pattern) is what `rowCount`/`getScrollSize`/`onScrollMouseDown`/
+  `drawScroll` all index into - avoids calling `Network::getDiscoveredServers()`
+  (which copies) more than once per frame and keeps row count and row
+  content consistent within a frame.
+  Incompatible-version rows are drawn in `Colour::grey` (vs `Colour::black`)
+  and `onScrollMouseDown`/`cursor` both refuse to treat them as clickable.
+  `WindowEventList` uses C++20 designated initializers, which **must appear
+  in the struct's declaration order** (`onClose`, `onMouseUp`, ...,
+  `onUpdate`, ..., `getScrollSize`, `scrollMouseDown`, ..., `textInput`, ...,
+  `cursor`, ..., `draw`, `drawScroll`, ...) - easy to get a "designated
+  initializers must appear in member declaration order" compile error by
+  listing handlers in a different order than `Ui/Window.h`'s `WindowEventList`
+  declares them.
+  TitleMenu's multiplayer button now calls `ServerBrowser::open()` instead of
+  opening the address `TextInput` itself; the old `showMultiplayer()`/
+  `multiplayerConnect()` static functions were deleted from `TitleMenu.cpp`
+  entirely (not left as dead code) now that their logic lives in
+  `Network::parseServerAddress` + `ServerBrowser`.
+  New string `StringIds::server_browser_join_by_address = 2460` ("Join by
+  address...", en-GB.yml only) - same established fallback-to-English
+  pattern as `option_enable_multiplayer`/`chat_players_button` before it; the
+  window's own caption uses `StringIds::empty` like `PlayerList`/
+  `NetworkStatus` (no new caption string needed).
+- Headless test hook: `--test_discover` (`CommandLine.h`/`.cpp`, hidden, same
+  convention as every other test-only flag here) is a plain boolean (no
+  value) - unlike `--test_rename`/`--test_host_load` etc., there is no
+  parameter to parse, since this mode never joins anything (no address, no
+  port - discovery already knows to probe `kDefaultPort`). Driven from
+  `Network::tick()` (not from `NetworkClient`, since this mode never opens
+  one at all): starts discovery on first tick where the flag is set, logs
+  `[TEST] discovered server: '<name>' <address>:<port> players=N/M
+  version=V` once per unique server (deduped by an `"address:port"` string
+  key so a still-active server isn't re-logged every frame), then calls
+  `endServerDiscovery()` after ~10s and stops (the process itself keeps
+  running - headless has no exit path, same as every other hidden test hook
+  in this codebase).
+- `scripts\run_sync_smoke_test.ps1` gained `-TestDiscovery`: the *second*
+  process runs `--test_discover` instead of `join 127.0.0.1` (host runs
+  completely normally - no special host-side flag exists or is needed, since
+  discovery-answering is unconditional server behaviour now). Assertions
+  that don't apply in this mode are skipped (gameplay-transition, join/
+  assignment `switch ($Expect)`), the "accepted 1 client" assertion is
+  replaced with "accepted 0 clients" (proves discovery genuinely never joins,
+  not just that its log lines were suppressed), and a new assertion checks
+  for the exact discovered-server line (name `'Player #0'` - the headless
+  fixture's empty `preferredOwnerName` fallback, same as every other smoke
+  test's roster lines; port `11754` - `kDefaultPort`, since neither process
+  overrides `--bind`/`--port` in this script; `maxPlayers` always `32`
+  (`kMaxRosterEntries`); `version=7`, this build's `kNetworkVersion` at the
+  time of writing - bump the regex alongside any future version bump). The
+  standard zero-`[ERR]`/desync and both-processes-alive-at-end assertions
+  still apply and still run unconditionally.
+- Verified end-to-end headless (20s run): client log — `[TEST] discovery
+  started` → `[TEST] discovered server: 'Player #0' 127.0.0.1:11754
+  players=1/32 version=7` → `[TEST] discovery finished`; host log has zero
+  `[TEST]`/`[ERR]`/`Accepted new client` lines for the whole run (confirmed
+  by `Select-String` returning nothing at all against the host log, not just
+  passing the smoke script's aggregate error-line check). Regression: build
+  clean (`App` + `OpenLocoTests`), `ctest -C Release` 145/145, `-TestRename`
+  (own policy, 60s run) still PASSes with the verified rename line.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the

@@ -47,6 +47,8 @@ NetworkServer::~NetworkServer()
 
 void NetworkServer::listen(const std::string& bind, port_t port)
 {
+    _listenPort = port;
+
     // IPv4
     try
     {
@@ -218,6 +220,19 @@ void NetworkServer::onReceivePacket(IUdpSocket& socket, std::unique_ptr<INetwork
     auto client = findClient(*endpoint);
     if (client == nullptr)
     {
+        // LAN server discovery (docs/multiplayer.md § LAN server discovery):
+        // handled here, alongside connect handling, for exactly the same
+        // reason - the sender is not (yet, or ever, in this case) an
+        // established client. Unlike connect, this never creates a
+        // NetworkConnection/Client - it is answered directly via the socket
+        // and never validates the requester's version (the request carries
+        // none).
+        if (auto discoveryRequest = packet.as<PacketKind::discoveryRequest, DiscoveryRequestPacket>())
+        {
+            onReceiveDiscoveryRequestPacket(socket, *endpoint, *discoveryRequest);
+            return;
+        }
+
         auto connectPacket = packet.as<PacketKind::connect, ConnectPacket>();
         if (connectPacket != nullptr)
         {
@@ -232,6 +247,35 @@ void NetworkServer::onReceivePacket(IUdpSocket& socket, std::unique_ptr<INetwork
     {
         client->connection->receivePacket(packet);
     }
+}
+
+void NetworkServer::onReceiveDiscoveryRequestPacket(IUdpSocket& socket, const INetworkEndpoint& endpoint, const DiscoveryRequestPacket& request)
+{
+    DiscoveryResponsePacket response;
+    response.cookie = request.cookie;
+    response.version = kNetworkVersion;
+    response.port = _listenPort;
+    response.playerCount = static_cast<uint8_t>(std::min<size_t>(_clients.size() + 1, 255)); // +1 for the host itself
+    response.maxPlayers = static_cast<uint8_t>(kMaxRosterEntries);
+    response.joinPolicy = static_cast<uint8_t>(getCommandLineOptions().joinPolicy);
+
+    auto name = resolveDisplayName(Config::get().preferredOwnerName, 0);
+    auto nameLength = std::min(name.size(), sizeof(response.name));
+    response.nameLength = static_cast<uint8_t>(nameLength);
+    std::memcpy(response.name, name.data(), nameLength);
+
+    // Connectionless reply: framed exactly like NetworkConnection::sendPacket
+    // does (PacketHeader + payload), but written straight to the socket -
+    // no sequence number semantics, no ack, no resend. A lost reply is
+    // simply not seen this round; the browsing client probes again ~1s
+    // later (see ServerDiscovery).
+    Packet framed;
+    framed.header.kind = PacketKind::discoveryResponse;
+    framed.header.sequence = 0;
+    framed.header.dataSize = static_cast<uint16_t>(sizeof(response));
+    std::memcpy(framed.data, &response, sizeof(response));
+
+    socket.sendData(endpoint, &framed, sizeof(PacketHeader) + framed.header.dataSize);
 }
 
 void NetworkServer::onReceivePacketFromClient(Client& client, const Packet& packet)

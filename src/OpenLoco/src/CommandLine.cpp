@@ -314,7 +314,8 @@ namespace OpenLoco
                           .registerOption("--test_rename", 1)
                           .registerOption("--test_host_load", 1)
                           .registerOption("--test_shutdown_after", 1)
-                          .registerOption("--test_blackhole", 1);
+                          .registerOption("--test_blackhole", 1)
+                          .registerOption("--test_discover");
 
         if (!parser.parse())
         {
@@ -473,6 +474,8 @@ namespace OpenLoco
                 return {};
             }
         }
+
+        options.testDiscover = parser.hasOption("--test_discover");
 
         return options;
     }

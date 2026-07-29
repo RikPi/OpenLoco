@@ -305,6 +305,72 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
         case. Host migration remains explicitly out of scope (per the design
         doc) and was not addressed.
 
+## Milestone 3: lobby (phase 1 — LAN server discovery)
+
+- [x] **LAN server discovery** (design: `docs/multiplayer.md` § LAN server
+      discovery). Network version bumped to 7. Two new connectionless packet
+      kinds, `discoveryRequest`/`discoveryResponse` (`Packet.h`), handled
+      directly in `NetworkServer::onReceivePacket` for endpoints that are not
+      an established client (alongside the existing connect handling) —
+      bypasses `NetworkConnection` sequencing entirely (no acks; a raw
+      `IUdpSocket::sendData` reply). The server answers ANY discoveryRequest
+      regardless of the requester's version (the request carries none) and
+      self-describes its own version, so a browser can grey out incompatible
+      servers rather than the version bump gating discoverability itself.
+      `Socket.cpp`'s previously dormant `SO_BROADCAST` enable was turned on
+      (unconditionally, on every UDP socket — smallest viable change, and
+      harmless for the pre-existing game-connection sockets which never send
+      to a broadcast address).
+      Client side: `Network/ServerDiscovery.{h,cpp}` — a small class reusing
+      `NetworkBase`'s background receive-thread plumbing (not a real
+      session), probing `255.255.255.255:<port>` and `127.0.0.1:<port>`
+      roughly once a second (both target `kDefaultPort` only — a
+      non-default-port server isn't found this way, but stays reachable via
+      "Join by address"), deduplicating responses by endpoint with a ~5s
+      expiry. Facade: `Network::beginServerDiscovery()`/`endServerDiscovery()`/
+      `getDiscoveredServers()`, plus a shared `Network::parseServerAddress()`
+      helper (moved out of `TitleMenu::multiplayerConnect`, unchanged, so the
+      browser's "Join by address" prompt and the browser's row-click path
+      agree on host:port/[ipv6]:port parsing).
+      UI: `Ui/Windows/ServerBrowser.cpp` (`WindowType::serverBrowser`, first
+      free slot past `playerList`), modeled on `PlayerList.cpp` for the
+      facade/registration/CMakeLists pattern with a trimmed-down
+      `CompanyList.cpp`-style `ScrollView` for the clickable row list.
+      TitleMenu's multiplayer button now opens the browser instead of the
+      raw address prompt directly; the prompt itself moved into the
+      browser's "Join by address" button (new string
+      `StringIds::server_browser_join_by_address` = 2460, en-GB-only, same
+      fallback pattern as the two strings before it). Discovery runs only
+      while the window is open (`Network::beginServerDiscovery()` in
+      `open()`, `endServerDiscovery()` in `onClose()`).
+      Headless test hook: hidden client CLI flag `--test_discover`
+      (`CommandLine.h`/`.cpp`) drives a small state machine in `Network.cpp`
+      (`updateTestDiscoverHook()`, called from `Network::tick()`, which
+      already runs every frame regardless of mode/scene): instead of
+      joining, starts discovery, logs `[TEST] discovered server: '<name>'
+      <address>:<port> players=N/M version=V` for each unique server found,
+      then stops probing after ~10s (the process itself keeps running —
+      headless has no exit path, same as every other test hook here).
+      `scripts\run_sync_smoke_test.ps1` gained `-TestDiscovery` (passes
+      `--test_discover` to the second process instead of `join
+      127.0.0.1`; asserts the discovered-server line with the expected
+      name/port/version, asserts the host accepted 0 clients — proving
+      discovery never joins — and skips the gameplay-transition/company-
+      assignment assertions, which don't apply since this process never
+      joins; the standard zero-`[ERR]`/desync and both-processes-alive
+      assertions still apply and still run). Verified end-to-end headless
+      (20s run): client log shows `[TEST] discovery started` →
+      `[TEST] discovered server: 'Player #0' 127.0.0.1:11754 players=1/32
+      version=7` → `[TEST] discovery finished`; host log has zero
+      `[TEST]`/`[ERR]`/`Accepted new client` lines (confirms discovery never
+      triggers the join path at all); build clean; ctest 145/145;
+      `-TestRename` (own policy) regression PASSes unchanged.
+      Design-doc note only (no code): `docs/multiplayer.md` § Master server
+      (phase 2 — constraints) records that a future internet-wide server
+      list needs only a tiny stateless HTTP announce/list service (TTL'd
+      periodic announces, a config-value master URL, in-game browser merges
+      master + LAN results) — explicitly not implemented.
+
 ## Backlog
 
 - [x] Scripted smoke test: `scripts/run_sync_smoke_test.ps1` (gensave →
@@ -386,7 +452,10 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
 - [x] Reconnect - done, see Milestone 2 above and KNOWLEDGEBASE.md § Reconnect
       implementation notes / § Reconnect test hook. Host migration remains
       explicitly out of scope per the design doc and is not addressed.
-- [ ] Lobby & server browser
+- [x] Lobby & server browser — phase 1 (LAN discovery) done, see the
+      completed "LAN server discovery" item below. Phase 2 (internet master
+      server) is explicitly out of scope; see docs/multiplayer.md § Master
+      server (phase 2 — constraints) for the design note only.
 - [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
 - [x] Graceful shutdown for `--headless`: hidden `--test_shutdown_after
       <seconds>` CLI-driven hook (`CommandLine.{h,cpp}`, deliberately not in

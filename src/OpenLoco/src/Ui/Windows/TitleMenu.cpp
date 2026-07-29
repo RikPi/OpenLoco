@@ -144,8 +144,6 @@ namespace OpenLoco::Ui::Windows::TitleMenu
     static void sub_4391DA();
     static void sub_4391E2();
     static void sub_43910A();
-    static void showMultiplayer(Window* window);
-    static void multiplayerConnect(std::string_view host);
     static const WindowEventList& getEvents();
 
     Window* open()
@@ -331,7 +329,11 @@ namespace OpenLoco::Ui::Windows::TitleMenu
                 }
                 else
                 {
-                    showMultiplayer(&window);
+                    // Phase 1 lobby (docs/multiplayer.md § LAN server
+                    // discovery): the browser owns the "Join by address"
+                    // prompt now (see ServerBrowser.cpp); this button no
+                    // longer opens the raw address text input directly.
+                    ServerBrowser::open();
                 }
                 break;
         }
@@ -367,9 +369,6 @@ namespace OpenLoco::Ui::Windows::TitleMenu
             case Widx::kChatBtn:
                 sub_43918F(input);
                 break;
-            case Widx::kMultiplayerToggleBtn:
-                multiplayerConnect(input);
-                break;
         }
     }
 
@@ -379,63 +378,6 @@ namespace OpenLoco::Ui::Windows::TitleMenu
         // Reset tooltip timeout to keep tooltips open.
         Ui::ToolTip::setTooltipTimeout(2000);
         return fallback;
-    }
-
-    static void showMultiplayer(Window* window)
-    {
-        StringManager::setString(StringIds::buffer_2039, "");
-        TextInput::openTextInput(window, StringIds::enter_host_address, StringIds::enter_host_address_description, StringIds::buffer_2039, widx::multiplayer_toggle_btn, {});
-    }
-
-    static void multiplayerConnect(std::string_view input)
-    {
-        // Accept "host", "host:port" and "[ipv6]:port"
-        auto host = input;
-        auto port = Network::kDefaultPort;
-
-        auto parsePort = [&](std::string_view text) {
-            uint32_t value = 0;
-            for (auto c : text)
-            {
-                if (c < '0' || c > '9')
-                {
-                    return false;
-                }
-                value = value * 10 + (c - '0');
-            }
-            if (text.empty() || value == 0 || value > 0xFFFFU)
-            {
-                return false;
-            }
-            port = static_cast<Network::port_t>(value);
-            return true;
-        };
-
-        if (!input.empty() && input.front() == '[')
-        {
-            // [ipv6]:port
-            auto closing = input.find(']');
-            if (closing != std::string_view::npos)
-            {
-                host = input.substr(1, closing - 1);
-                auto rest = input.substr(closing + 1);
-                if (rest.size() >= 2 && rest.front() == ':')
-                {
-                    parsePort(rest.substr(1));
-                }
-            }
-        }
-        else if (auto colon = input.find(':'); colon != std::string_view::npos && input.find(':', colon + 1) == std::string_view::npos)
-        {
-            // Exactly one colon: host:port. (Bare IPv6 addresses contain
-            // several colons and are passed through unchanged.)
-            if (parsePort(input.substr(colon + 1)))
-            {
-                host = input.substr(0, colon);
-            }
-        }
-
-        Network::joinServer(host, port);
     }
 
     static void sub_43910A()

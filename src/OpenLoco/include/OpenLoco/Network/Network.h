@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace OpenLoco::GameCommands
@@ -41,7 +42,16 @@ namespace OpenLoco::Network
     // (skipping join policy - the existing assignmentResolved snapshot/
     // resend path does the rest); RosterEntry gained a `reserved` flag so
     // the roster can show reserved seats as "<name> (disconnected)".
-    constexpr uint16_t kNetworkVersion = 6;
+    // Version 7: LAN server discovery (docs/multiplayer.md § LAN server
+    // discovery) - two new connectionless packet kinds (discoveryRequest/
+    // discoveryResponse, Packet.h) that bypass NetworkConnection sequencing
+    // entirely (no acks; handled directly in NetworkServer::onReceivePacket
+    // for endpoints that are not an established client). The server answers
+    // ANY discoveryRequest regardless of the requester's version (the
+    // request carries none) and self-describes its own version in the
+    // response, so a browser can grey out incompatible servers rather than
+    // this version bump itself gating whether a server can be found at all.
+    constexpr uint16_t kNetworkVersion = 7;
 
     /**
      * Machine-local snapshot of one player/spectator, used to drive the
@@ -70,6 +80,16 @@ namespace OpenLoco::Network
      */
     std::string resolveDisplayName(std::string_view raw, client_id_t id);
 
+    /**
+     * Parses a free-form server address as typed by a player into a
+     * (host, port) pair, defaulting to kDefaultPort when no port is given.
+     * Accepts "host", "host:port" and "[ipv6]:port" (a bare IPv6 address
+     * with no port contains several colons and is passed through
+     * unchanged). Shared by every UI entry point that accepts such an
+     * address (the ServerBrowser "Join by address" prompt).
+     */
+    std::pair<std::string, port_t> parseServerAddress(std::string_view input);
+
     void openServer();
     bool joinServer(std::string_view host);
     bool joinServer(std::string_view host, port_t port);
@@ -88,6 +108,44 @@ namespace OpenLoco::Network
      * received from the server.
      */
     std::vector<PlayerRosterEntry> getPlayerRoster();
+
+    /**
+     * A LAN server discovered via ServerDiscovery (see Network/
+     * ServerDiscovery.h), deduplicated by endpoint. Presentation data for
+     * the server browser UI only - never touches GameState or the game
+     * command stream.
+     */
+    struct DiscoveredServer
+    {
+        std::string address;
+        port_t port{};
+        std::string name;
+        uint16_t version{};
+        uint8_t playerCount{};
+        uint8_t maxPlayers{};
+        uint8_t joinPolicy{};
+        uint32_t lastSeen{}; // Platform::getTime() of the last discoveryResponse received
+    };
+
+    /**
+     * Starts broadcasting discoveryRequest probes on the LAN roughly once a
+     * second and collecting discoveryResponse replies (see
+     * Network/ServerDiscovery.h). Safe to call repeatedly - a no-op while
+     * already active.
+     */
+    void beginServerDiscovery();
+
+    /**
+     * Stops discovery and forgets everything found so far. Safe to call
+     * when not active.
+     */
+    void endServerDiscovery();
+
+    /**
+     * Snapshot copy of servers seen within the last ~5s. Empty when
+     * discovery is not active.
+     */
+    std::vector<DiscoveredServer> getDiscoveredServers();
 
     /**
      * Host only: after the local game state has been replaced (a different

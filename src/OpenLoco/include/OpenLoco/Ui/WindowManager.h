@@ -353,6 +353,11 @@ namespace OpenLoco::Ui::Windows
         Window* open();
     }
 
+    namespace ServerBrowser
+    {
+        Window* open();
+    }
+
     namespace Station
     {
         Window* open(StationId id);

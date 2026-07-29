@@ -125,6 +125,47 @@ reclaim its company, instead of being treated as a brand-new player.
 Host migration is out of scope for this design; a dead host still ends the
 session.
 
+## LAN server discovery (implemented, network version 7)
+
+Phase 1 of the lobby (see the goal sequence at the top of this document).
+Two new connectionless packet kinds (`discoveryRequest`/`discoveryResponse`,
+`Packet.h`) bypass `NetworkConnection` sequencing entirely — no acks,
+handled directly in `NetworkServer::onReceivePacket` for endpoints that are
+not an established client, alongside the existing connect handling. The
+server answers ANY `discoveryRequest` regardless of the requester's version
+(the request carries none) and self-describes its own version in the
+response, so a browser can grey out incompatible servers instead of simply
+failing to find them.
+
+Client side (`Network/ServerDiscovery.{h,cpp}`) opens its own UDP socket and
+probes roughly once a second to `255.255.255.255:<port>` (LAN broadcast) and
+`127.0.0.1:<port>` (loopback, since broadcast usually doesn't reach it) —
+both target `kDefaultPort` only, so a server bound to a non-default port is
+not discovered this way (it remains reachable via "Join by address").
+Responses are deduplicated by endpoint and expire after ~5s without a fresh
+reply. Facade: `Network::beginServerDiscovery()` / `endServerDiscovery()` /
+`getDiscoveredServers()`.
+
+UI: `Ui/Windows/ServerBrowser.cpp` (`WindowType::serverBrowser`) lists
+discovered servers, greying out incompatible versions, and is now what
+TitleMenu's multiplayer button opens (instead of the raw address prompt
+directly) — the prompt itself lives on in the browser's "Join by address"
+button, sharing `Network::parseServerAddress` with the browser's row-click
+path. Discovery runs only while the window is open.
+
+### Master server (phase 2 — constraints)
+
+Out of scope for this pass, but the LAN design above should not preclude it:
+a future internet-wide server list needs only a tiny, stateless HTTP
+announce/list service (a single small binary, or something free-tier-hosting
+friendly like a personal VPS or Cloudflare-Workers-class platform — no
+database or persistent session state required). Servers would announce
+themselves to it periodically with a TTL (so a crashed/killed server simply
+expires off the list rather than needing explicit deregistration); the
+master service's URL would be an ordinary config value; and the in-game
+browser would merge its results with LAN discovery into one list. None of
+this is implemented here.
+
 ## Test strategy
 
 - `CommandSerializationTests` cover the wire codecs.

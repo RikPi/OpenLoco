@@ -72,6 +72,7 @@ namespace OpenLoco::Ui
 
         debug = 61,
         playerList = 62,
+        serverBrowser = 63,
 
         undefined = 255
     };

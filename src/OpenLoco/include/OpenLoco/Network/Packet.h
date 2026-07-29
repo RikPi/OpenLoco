@@ -29,6 +29,8 @@ namespace OpenLoco::Network
         rosterUpdate,
         serverClosing,
         resyncRequired,
+        discoveryRequest,
+        discoveryResponse,
     };
 
     struct PacketHeader
@@ -281,6 +283,48 @@ namespace OpenLoco::Network
         static constexpr PacketKind kind = PacketKind::resyncRequired;
         size_t size() const { return sizeof(ResyncRequiredPacket); }
     };
+
+    /**
+     * Sent connectionless - no NetworkConnection, no sequencing/acks - by a
+     * browsing client to discover servers on the LAN (docs/multiplayer.md §
+     * LAN server discovery). Handled directly in
+     * NetworkServer::onReceivePacket for endpoints that are not an
+     * established client, alongside the existing connect handling. The
+     * server answers ANY discoveryRequest regardless of the requester's
+     * version - the request carries none - so an incompatible client can
+     * still discover (and see as incompatible/greyed out) a server it
+     * cannot join.
+     */
+    struct DiscoveryRequestPacket
+    {
+        static constexpr PacketKind kind = PacketKind::discoveryRequest;
+        size_t size() const { return sizeof(DiscoveryRequestPacket); }
+
+        uint32_t cookie{};
+    };
+
+    /**
+     * Connectionless reply to a DiscoveryRequestPacket, sent directly via
+     * the socket (no NetworkConnection). Self-describes the server's own
+     * network version and display name/roster summary so a browser can list
+     * it and grey out incompatible versions, rather than the requester
+     * needing to be validated (it isn't - see DiscoveryRequestPacket).
+     */
+    struct DiscoveryResponsePacket
+    {
+        static constexpr PacketKind kind = PacketKind::discoveryResponse;
+        size_t size() const { return sizeof(DiscoveryResponsePacket); }
+
+        uint32_t cookie{}; // echoed from the request
+        uint16_t version{};
+        uint16_t port{}; // the server's own game port (probes are only ever sent to kDefaultPort; see ServerDiscovery)
+        uint8_t playerCount{};
+        uint8_t maxPlayers{}; // kMaxRosterEntries
+        uint8_t joinPolicy{}; // OpenLoco::JoinPolicy, wire-encoded as a plain byte to avoid a CommandLine.h include here
+        uint8_t nameLength{};
+        char name[kMaxRosterNameLength]{};
+    };
+    static_assert(sizeof(DiscoveryResponsePacket) <= kMaxPacketDataSize);
 
     /**
      * Wire form of a game command. The argument payload is the portable

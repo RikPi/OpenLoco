@@ -18,6 +18,10 @@ client on loopback, lets them run, then asserts from the file logs that:
   - (with -TestReconnect) a simulated network outage (client-side blackhole)
     caused a genuine two-sided timeout; the client auto-reconnected with its
     saved session token and reclaimed the SAME company it had before
+  - (with -TestDiscovery) instead of joining, the second process runs LAN
+    server discovery and logs the host it found via loopback (name/port/
+    version) -- the host is never actually joined (no assignment/gameplay in
+    this mode; see below for which standard assertions still apply)
 
 Requires: a built tree (windows-release preset), the stub install dir
 (fake-locomotion with Data\g1.DAT), allow_multiple_instances: true in the
@@ -72,7 +76,17 @@ param(
     # (>= 80). Requires -JoinPolicy own or coop (need a company assignment to
     # compare before/after). Not meaningful combined with the other -Test*
     # switches.
-    [switch]$TestReconnect
+    [switch]$TestReconnect,
+    # Exercise LAN server discovery headlessly (docs/multiplayer.md § LAN
+    # server discovery): the second process runs `--test_discover` instead
+    # of `join 127.0.0.1` -- it never joins the host at all, it just probes
+    # for it (broadcast + loopback) and logs each unique server found for
+    # ~10s, then stops probing (the process itself keeps running - headless
+    # has no exit path). The host runs completely normally (it always
+    # answers discoveryRequest packets; no special host flag is needed).
+    # Needs enough time for the ~10s discovery window to complete; enforced
+    # below (>= 15). Not meaningful combined with the other -Test* switches.
+    [switch]$TestDiscovery
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,11 +151,11 @@ function Set-TitleSequenceFlag([string]$path)
     [IO.File]::WriteAllBytes($path, $bytes)
 }
 
-$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent)
+$testHookFlags = @($TestRename.IsPresent, $TestHostLoad.IsPresent, $TestShutdown.IsPresent, $TestReconnect.IsPresent, $TestDiscovery.IsPresent)
 $exclusiveSwitchCount = ($testHookFlags | Where-Object { $_ }).Count
 if ($exclusiveSwitchCount -gt 1)
 {
-    Fail 'TestRename, TestHostLoad, TestShutdown and TestReconnect are mutually exclusive -- run each in its own invocation'
+    Fail 'TestRename, TestHostLoad, TestShutdown, TestReconnect and TestDiscovery are mutually exclusive -- run each in its own invocation'
 }
 
 if ($TestHostLoad -and $RunSeconds -lt 50)
@@ -167,6 +181,11 @@ if ($TestReconnect -and $RunSeconds -lt 80)
 if ($TestReconnect -and $JoinPolicy -eq 'spectator')
 {
     Fail '-TestReconnect requires -JoinPolicy own or coop -- a spectator client never gets an "Assigned company" line to compare before/after'
+}
+
+if ($TestDiscovery -and $RunSeconds -lt 15)
+{
+    Fail "-TestDiscovery's discovery window runs for ~10s; use -RunSeconds >= 15 (got $RunSeconds)"
 }
 
 if ($Expect -eq '')
@@ -224,14 +243,24 @@ try
 
     Write-Host 'Starting client...'
     $testRenameName = 'SyncTest'
-    $clientArgs = @('--locomotion_path', $LocomotionPath, '--headless', '--log_levels', 'all', 'join', '127.0.0.1')
-    if ($TestRename)
+    $clientArgs = @('--locomotion_path', $LocomotionPath, '--headless', '--log_levels', 'all')
+    if ($TestDiscovery)
     {
-        $clientArgs += @('--test_rename', $testRenameName)
+        # Instead of joining: probes for the host via LAN discovery
+        # (broadcast + loopback) and logs what it finds. Never connects.
+        $clientArgs += @('--test_discover')
     }
-    if ($TestReconnect)
+    else
     {
-        $clientArgs += @('--test_blackhole', '20,20')
+        $clientArgs += @('join', '127.0.0.1')
+        if ($TestRename)
+        {
+            $clientArgs += @('--test_rename', $testRenameName)
+        }
+        if ($TestReconnect)
+        {
+            $clientArgs += @('--test_blackhole', '20,20')
+        }
     }
     $clientProc = Start-Process $exe -ArgumentList $clientArgs -PassThru -NoNewWindow
 
@@ -252,25 +281,41 @@ try
     $clientLog = Get-Content $logs[1].FullName
 
     $accepts = ($hostLog | Select-String 'Accepted new client').Count
-    if ($accepts -ne 1) { Fail "host accepted $accepts clients (expected 1)" }
-
-    if (($clientLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1)
+    if ($TestDiscovery)
     {
-        Fail 'client never reached gameplay (state transfer incomplete)'
+        # The discovery process never sends a ConnectPacket at all -- it
+        # only probes and listens for discoveryResponse. Confirms discovery
+        # really does bypass the join flow entirely, not just skip logging.
+        if ($accepts -ne 0) { Fail "host accepted $accepts clients (expected 0 -- -TestDiscovery must never join)" }
+    }
+    else
+    {
+        if ($accepts -ne 1) { Fail "host accepted $accepts clients (expected 1)" }
     }
 
-    switch ($Expect)
+    # Gameplay-transition and join-assignment assertions are meaningless for
+    # -TestDiscovery: that process never joins, so it never receives a
+    # snapshot or a company assignment, and never transitions to gameplay.
+    if (-not $TestDiscovery)
     {
-        'company'
+        if (($clientLog | Select-String 'Scene transition: boot -> gameplay' -SimpleMatch).Count -lt 1)
         {
-            if (($hostLog | Select-String 'Assigned (host )?company \d+ to client').Count -lt 1) { Fail 'host never assigned a company' }
-            if (($clientLog | Select-String 'Assigned company \d+').Count -lt 1) { Fail 'client never received its company assignment' }
+            Fail 'client never reached gameplay (state transfer incomplete)'
         }
-        'spectator'
+
+        switch ($Expect)
         {
-            if (($clientLog | Select-String 'remaining a spectator').Count -lt 1) { Fail 'client never acknowledged spectator role' }
+            'company'
+            {
+                if (($hostLog | Select-String 'Assigned (host )?company \d+ to client').Count -lt 1) { Fail 'host never assigned a company' }
+                if (($clientLog | Select-String 'Assigned company \d+').Count -lt 1) { Fail 'client never received its company assignment' }
+            }
+            'spectator'
+            {
+                if (($clientLog | Select-String 'remaining a spectator').Count -lt 1) { Fail 'client never acknowledged spectator role' }
+            }
+            default { Fail "unknown expectation '$Expect'" }
         }
-        default { Fail "unknown expectation '$Expect'" }
     }
 
     if ($TestRename -and $Expect -eq 'company')
@@ -380,6 +425,22 @@ try
         # reconnect above was a reclaim, not a second fresh join.
     }
 
+    if ($TestDiscovery)
+    {
+        # The host's own display name falls back to "Player #0" under the
+        # headless fixture (empty preferredOwnerName - see
+        # Network::resolveDisplayName), and it always binds to the default
+        # port (11754) here since neither the host nor client override
+        # --bind/--port in this script. maxPlayers is always kMaxRosterEntries
+        # (32); version must match this build's kNetworkVersion (7 as of
+        # this writing -- bump alongside kNetworkVersion if it changes).
+        $discoveredMatch = $clientLog | Select-String "\[TEST\] discovered server: 'Player #0' 127\.0\.0\.1:11754 players=\d+/32 version=7" | Select-Object -First 1
+        if (-not $discoveredMatch)
+        {
+            Fail "client never logged discovering the host (expected a '[TEST] discovered server: ''Player #0'' 127.0.0.1:11754 players=N/32 version=7' line)"
+        }
+    }
+
     $badLines = @($hostLog + $clientLog | Select-String '\[ERR\]|[Dd]esync')
     if ($badLines.Count -gt 0)
     {
@@ -392,6 +453,7 @@ try
     elseif ($TestHostLoad) { $extraNote = ', host-load resync verified' }
     elseif ($TestShutdown) { $extraNote = ', graceful shutdown verified (no auto-reconnect)' }
     elseif ($TestReconnect) { $extraNote = ', auto-reconnect + seat reclaim verified' }
+    elseif ($TestDiscovery) { $extraNote = ', LAN discovery verified (host found via loopback, never joined)' }
     Write-Host "PASS: lockstep held for $RunSeconds s (policy=$JoinPolicy, expect=$Expect$extraNote)" -ForegroundColor Green
     exit 0
 }

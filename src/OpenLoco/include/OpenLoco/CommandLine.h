@@ -81,6 +81,14 @@ namespace OpenLoco
         // scripted fake disconnect. Drives the reconnect smoke test. See
         // KNOWLEDGEBASE.md § Reconnect test hook.
         std::optional<std::pair<int32_t, int32_t>> testBlackhole{};
+        // Hidden headless test hook (deliberately omitted from --help),
+        // client-side: instead of joining a server, runs LAN server
+        // discovery (Network::beginServerDiscovery()) for ~10s and logs
+        // each unique server found, then stops probing (the process itself
+        // keeps running - headless has no exit path here, same as every
+        // other test hook). See Network.cpp's --test_discover hook and
+        // KNOWLEDGEBASE.md § LAN server discovery test hook.
+        bool testDiscover{};
     };
 
     std::optional<CommandLineOptions> parseCommandLine(std::vector<std::string>&& argv);

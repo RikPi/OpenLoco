@@ -2189,6 +2189,10 @@ namespace OpenLoco::StringIds
     // roster window). Same en-GB-only pattern as option_enable_multiplayer
     // above.
     constexpr StringId chat_players_button = 2459;
+    // New string: label for the ServerBrowser window's "Join by address"
+    // button (opens the same enter_host_address prompt the old TitleMenu
+    // flow used). Same en-GB-only pattern as the two ids above.
+    constexpr StringId server_browser_join_by_address = 2460;
 
     constexpr StringId temporary_object_load_str_0 = 8192;
     constexpr StringId temporary_object_load_str_1 = 8193;

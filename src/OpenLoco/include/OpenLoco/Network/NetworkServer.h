@@ -84,6 +84,11 @@ namespace OpenLoco::Network
         std::vector<ReservedSeat> _reservedSeats;
         std::queue<ChatMessage> _chatMessageQueue;
         client_id_t _nextClientId = 1;
+        // The port passed to listen() - the server's own game port, echoed
+        // back in DiscoveryResponsePacket (docs/multiplayer.md § LAN server
+        // discovery) since a browsing client's probes are only ever sent to
+        // kDefaultPort, which may differ from this.
+        port_t _listenPort{};
         uint32_t _lastPing{};
         uint32_t _gameCommandIndex{};
         std::queue<ServerQueuedGameCommand> _gameCommands;
@@ -117,6 +122,11 @@ namespace OpenLoco::Network
         Client* findClient(const INetworkEndpoint& endpoint);
         Client* findClient(client_id_t id);
         void createNewClient(std::unique_ptr<NetworkConnection> conn, const ConnectPacket& packet);
+        // LAN server discovery (docs/multiplayer.md § LAN server discovery):
+        // answered connectionless, directly via the socket - never creates a
+        // Client or NetworkConnection. Answers ANY discoveryRequest
+        // regardless of the requester's version (the request carries none).
+        void onReceiveDiscoveryRequestPacket(IUdpSocket& socket, const INetworkEndpoint& endpoint, const DiscoveryRequestPacket& request);
         void onReceivePacketFromClient(Client& client, const Packet& packet);
         void onReceiveStateRequestPacket(Client& client, const RequestStatePacket& packet);
         void onReceiveSendChatMessagePacket(Client& client, const SendChatMessage& packet);

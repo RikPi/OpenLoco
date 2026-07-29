@@ -9,6 +9,7 @@
 #include "Logging.h"
 #include "Network/NetworkClient.h"
 #include "Network/NetworkServer.h"
+#include "Network/ServerDiscovery.h"
 #include "Network/Socket.h"
 #include "S5/S5.h"
 #include "Scenario/ScenarioManager.h"
@@ -46,6 +47,60 @@ namespace OpenLoco::Network
             return fmt::format("Player #{}", id);
         }
         return std::string(trimmed);
+    }
+
+    // Moved here (unchanged) from TitleMenu::multiplayerConnect so both the
+    // ServerBrowser "Join by address" prompt and (previously) the TitleMenu
+    // address prompt share one implementation.
+    std::pair<std::string, port_t> parseServerAddress(std::string_view input)
+    {
+        // Accepts "host", "host:port" and "[ipv6]:port".
+        auto host = input;
+        auto port = kDefaultPort;
+
+        auto parsePort = [&](std::string_view text) {
+            uint32_t value = 0;
+            for (auto c : text)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return false;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (text.empty() || value == 0 || value > 0xFFFFU)
+            {
+                return false;
+            }
+            port = static_cast<port_t>(value);
+            return true;
+        };
+
+        if (!input.empty() && input.front() == '[')
+        {
+            // [ipv6]:port
+            auto closing = input.find(']');
+            if (closing != std::string_view::npos)
+            {
+                host = input.substr(1, closing - 1);
+                auto rest = input.substr(closing + 1);
+                if (rest.size() >= 2 && rest.front() == ':')
+                {
+                    parsePort(rest.substr(1));
+                }
+            }
+        }
+        else if (auto colon = input.find(':'); colon != std::string_view::npos && input.find(':', colon + 1) == std::string_view::npos)
+        {
+            // Exactly one colon: host:port. (Bare IPv6 addresses contain
+            // several colons and are passed through unchanged.)
+            if (parsePort(input.substr(colon + 1)))
+            {
+                host = input.substr(0, colon);
+            }
+        }
+
+        return { std::string(host), port };
     }
 
     bool toWirePacket(const std::vector<PlayerRosterEntry>& roster, RosterUpdatePacket& packet)
@@ -255,6 +310,65 @@ namespace OpenLoco::Network
         _reconnect.nextAttemptTime = Platform::getTime() + kReconnectIntervalMs;
     }
 
+    // --- LAN discovery headless test hook (--test_discover) -----------------
+    //
+    // Instead of joining, exercises ServerDiscovery end-to-end (the loopback
+    // probe reaches a host process running on the same machine) and logs
+    // each unique server found, then stops probing after ~10s. Driven from
+    // tick() below, which already runs every frame regardless of network
+    // mode/scene - this mode never opens a NetworkClient/NetworkServer at
+    // all, it only starts discovery.
+    namespace
+    {
+        constexpr uint32_t kTestDiscoverDurationMs = 10000;
+
+        bool _testDiscoverActive{};
+        bool _testDiscoverDone{};
+        uint32_t _testDiscoverStart{};
+        std::vector<std::string> _testDiscoverLogged; // "address:port" keys already logged - avoids re-logging the same server every frame
+
+        void updateTestDiscoverHook()
+        {
+            if (_testDiscoverDone || !getCommandLineOptions().testDiscover)
+            {
+                return;
+            }
+
+            if (!_testDiscoverActive)
+            {
+                _testDiscoverActive = true;
+                _testDiscoverStart = Platform::getTime();
+                beginServerDiscovery();
+                Logging::info("[TEST] discovery started");
+            }
+
+            for (const auto& server : getDiscoveredServers())
+            {
+                auto key = fmt::format("{}:{}", server.address, server.port);
+                if (std::find(_testDiscoverLogged.begin(), _testDiscoverLogged.end(), key) != _testDiscoverLogged.end())
+                {
+                    continue;
+                }
+                _testDiscoverLogged.push_back(key);
+                Logging::info(
+                    "[TEST] discovered server: '{}' {}:{} players={}/{} version={}",
+                    server.name,
+                    server.address,
+                    server.port,
+                    server.playerCount,
+                    server.maxPlayers,
+                    server.version);
+            }
+
+            if (Platform::getTime() - _testDiscoverStart >= kTestDiscoverDurationMs)
+            {
+                _testDiscoverDone = true;
+                endServerDiscovery();
+                Logging::info("[TEST] discovery finished");
+            }
+        }
+    }
+
     void openServer()
     {
         assert(_mode == NetworkMode::none);
@@ -332,6 +446,12 @@ namespace OpenLoco::Network
 
     void tick()
     {
+        // Independent of network mode/scene - discovery can run while
+        // browsing servers from the title screen, with no
+        // NetworkClient/NetworkServer active at all.
+        ServerDiscovery::tick();
+        updateTestDiscoverHook();
+
         auto serverOrClient = getServerOrClient();
         if (serverOrClient != nullptr)
         {
@@ -410,6 +530,21 @@ namespace OpenLoco::Network
             default:
                 return {};
         }
+    }
+
+    void beginServerDiscovery()
+    {
+        ServerDiscovery::begin();
+    }
+
+    void endServerDiscovery()
+    {
+        ServerDiscovery::end();
+    }
+
+    std::vector<DiscoveredServer> getDiscoveredServers()
+    {
+        return ServerDiscovery::getServers();
     }
 
     static std::string resolveChatSenderName(client_id_t client)

@@ -563,11 +563,17 @@ namespace OpenLoco::Network
                 throw SocketException("Unable to create socket.");
             }
 
-            // Enable send and receiving of broadcast messages
-            // if (!setOption(sock, SOL_SOCKET, SO_BROADCAST, true))
-            // {
-            //     Console::logVerbose("setsockopt(socket, SO_BROADCAST) failed: %d", LAST_SOCKET_ERROR());
-            // }
+            // Enable sending/receiving broadcast messages. Needed for LAN
+            // server discovery (docs/multiplayer.md § LAN server discovery),
+            // which sends discoveryRequest probes to 255.255.255.255.
+            // Harmless for every other socket created here (server/client
+            // game connections never send to a broadcast address) - the
+            // smallest viable change is to enable it unconditionally here
+            // rather than add a setBroadcast()/discovery-only socket path.
+            if (!setOption(sock, SOL_SOCKET, SO_BROADCAST, true))
+            {
+                Logging::warn("setsockopt(socket, SO_BROADCAST) failed: {}", LAST_SOCKET_ERROR());
+            }
 
             if (protocol == Protocol::any)
             {
