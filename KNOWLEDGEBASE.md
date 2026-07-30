@@ -1418,6 +1418,25 @@ works and what tripped us up" reference.
   reached); `-TestMigration` PASSes (120s run) with the host, clientA and
   clientB logs matching TASKS.md's recorded evidence lines exactly.
 
+## Status UX polish and the phantom-cancel trap (final polish pass)
+
+- Chat window uses a real ScrollView: bottom-pinned while the user is at
+  the newest message, position preserved while scrolled up; 100-message
+  history. NetworkStatus leaves a readable, dismissable message for every
+  terminal state (failed connect, rejection, exhausted reconnect, server
+  shutdown); cancelling a resync returns to title.
+- **Trap (cost us a full smoke-matrix failure):** `NetworkStatus`'s window
+  `onClose` event fires the cancel callback for *every* close — programmatic
+  `close()` included. Historically harmless because most client states
+  ignored `onCancel()`; the moment `waitingForState` became cancellable,
+  the programmatic window close at state-transfer completion cancelled the
+  brand-new connection on every join. Symptom: phantom
+  `Connecting to server cancelled` in a headless log where no user exists.
+  Fix: `NetworkStatus::close()` clears the callback before closing — only
+  the user's close button may cancel. General lesson: window-close events
+  are not user intent; and always run the full smoke matrix after touching
+  status/window plumbing, even for "cosmetic" changes.
+
 ## Session / environment
 
 - Branch `multiplayer`; remotes: `origin` = github.com/RikPi/OpenLoco (the
@@ -1426,3 +1445,8 @@ works and what tripped us up" reference.
 - User does not own Locomotion (not free; ~€6 GOG/Steam, frequent sales).
 - Commit style: imperative subject, body explains why, trailer
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Commits are SSH-signed via the 1Password agent — signing fails with
+  "1Password: failed to fill whole buffer" while the vault is locked; ask
+  the user to unlock and retry, never bypass signing.
+- Overall orientation for a new contributor/session: read `HANDOFF.md`
+  first, then this file, then `docs/multiplayer.md`, then `TASKS.md`.

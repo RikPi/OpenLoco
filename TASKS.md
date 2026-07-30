@@ -2,7 +2,28 @@
 
 Working file for the multiplayer effort. Kept current as work proceeds.
 Design details live in `docs/multiplayer.md`; operational knowledge in
-`KNOWLEDGEBASE.md`.
+`KNOWLEDGEBASE.md`; overall status and orientation in `HANDOFF.md`.
+
+## STATUS: feature-complete (2026-07-30)
+
+Every planned milestone is done and verified: lockstep hardening + desync
+detection/recovery, session model (own/coop/spectator), reconnect, host
+migration, LAN discovery + internet master server (service and game
+integration), chat/roster/browser UI, sane save/load/quit semantics.
+152 unit tests, 7 self-verifying headless smoke modes, CI on every push.
+What remains is not development: deploying the master server (ops),
+real-asset play testing (requires purchasing Locomotion), and upstream
+contribution grooming (deliberately paused at the user's request).
+
+## Open (non-development)
+
+- [ ] Deploy `tools/master-server` to a real host (user's VPS or Fly.io;
+      README has systemd/Docker/fly.toml) and set `network.masterServer`
+- [ ] Real-asset play test once Locomotion is purchased (~€6, frequent
+      sales) — first windowed two-player session, real graphics
+- [ ] Upstream PR grooming when the user asks (candidates: divergence
+      fixes, nullTerminatedView, g1 null-guards, FileStream/Title fixes,
+      then the networking work as a draft PR referencing issue #95)
 
 ## Done
 
@@ -691,7 +712,21 @@ Design details live in `docs/multiplayer.md`; operational knowledge in
       the master server milestone section above). Deployment to a real
       host (user's VPS or Fly.io) is an ops task for whenever wanted; the
       game points at it via `network.masterServer` or `--master_server`.
-- [ ] Interpolate/harden `NetworkStatus` UX (connect progress, errors)
+- [x] Harden `NetworkStatus` UX + chat ScrollView (final polish pass,
+      `4bafe4d3`): every terminal state (failed connect, rejection,
+      exhausted reconnect, server shutdown) now leaves a readable,
+      dismissable message; cancelling a resync returns to title; the chat
+      window gained a real ScrollView (bottom-pinned when at the newest
+      message, untouched when scrolled up; 100-message history). This pass
+      also found and fixed a latent trap: `NetworkStatus` fired its cancel
+      callback on EVERY close, including programmatic ones — harmless while
+      most states ignored cancel, but once `waitingForState` became
+      cancellable, the programmatic window close at state-transfer
+      completion tore down every fresh connection (all smoke modes failed;
+      phantom "Connecting to server cancelled" in headless logs was the
+      tell). Programmatic `close()` now drops the callback; only the user's
+      close button cancels. Verified: 152/152, rename/shutdown/reconnect/
+      migration smoke modes all PASS.
 - [x] Graceful shutdown for `--headless`: hidden `--test_shutdown_after
       <seconds>` CLI-driven hook (`CommandLine.{h,cpp}`, deliberately not in
       `printHelp`, same hidden-test-hook pattern as `--test_rename`) plus a
