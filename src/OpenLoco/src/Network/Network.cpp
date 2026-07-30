@@ -381,7 +381,14 @@ namespace OpenLoco::Network
     static void giveUpReconnecting()
     {
         Logging::error("Reconnect failed after {} attempt(s); giving up", _reconnect.attempts);
-        Ui::Windows::NetworkStatus::close();
+        // Leave a readable, dismissable message instead of just closing the
+        // window out from under the player the instant this fires (whether
+        // reached by exhausting the retry budget, or by the player clicking
+        // Cancel mid-episode - both route through here). No callback: this
+        // is terminal, there's nothing left to cancel. The window survives
+        // the pending scene transition below (WindowFlags::stickToFront is
+        // exempted from Title::start()'s closeAllFloatingWindows()).
+        Ui::Windows::NetworkStatus::setText("Could not reconnect to the server. Giving up.", nullptr);
         SceneManager::requestScene(SceneManager::SceneId::title);
         close();
     }
@@ -508,7 +515,10 @@ namespace OpenLoco::Network
         catch (const std::exception& e)
         {
             Logging::error("Host migration: failed to promote to session host: {}", e.what());
-            Ui::Windows::NetworkStatus::close();
+            // Same reasoning as giveUpReconnecting(): leave the failure
+            // readable rather than closing the window out from under the
+            // player.
+            Ui::Windows::NetworkStatus::setText(fmt::format("Failed to take over hosting: {}", e.what()), nullptr);
             SceneManager::requestScene(SceneManager::SceneId::title);
         }
     }
@@ -730,7 +740,10 @@ namespace OpenLoco::Network
                     {
                         Logging::error("Host migration: could not rejoin the successor host after {} attempt(s); giving up", _migrationReclaim.attempts);
                         _migrationReclaim = {};
-                        Ui::Windows::NetworkStatus::close();
+                        // Same reasoning as giveUpReconnecting(): leave the
+                        // failure readable rather than closing the window
+                        // out from under the player.
+                        Ui::Windows::NetworkStatus::setText("Could not rejoin the new host. Giving up.", nullptr);
                         SceneManager::requestScene(SceneManager::SceneId::title);
                         close();
                     }

@@ -50,7 +50,24 @@ namespace OpenLoco::Ui::Windows::NetworkStatus
         _text = text;
         _cbClose = cbClose;
 
-        auto window = WindowManager::createWindowCentred(
+        // Only ever one status window at a time - callers (NetworkClient's
+        // own connect/resync flow, and the Network facade's reconnect/
+        // migration retry loop) can each call open() without first checking
+        // whether one is already up (e.g. a reconnect attempt's connect()
+        // call happens right after the facade's own showReconnectStatus()
+        // already opened one). Without this dedupe, a second call would
+        // stack a duplicate window on top - both sharing these same _text/
+        // _cbClose statics, so closing one would fire the (by-then
+        // overwritten) callback and leave an identical-looking window
+        // behind, un-dismissable except by another cancel.
+        auto window = WindowManager::find(WindowType::networkStatus);
+        if (window != nullptr)
+        {
+            window->invalidate();
+            return WindowManager::bringToFront(*window);
+        }
+
+        window = WindowManager::createWindowCentred(
             WindowType::networkStatus,
             kWindowSize,
             WindowFlags::lighterFrame | WindowFlags::stickToFront,
@@ -79,6 +96,11 @@ namespace OpenLoco::Ui::Windows::NetworkStatus
 
     void close()
     {
+        // Programmatic close is not a user cancel: the window's onClose
+        // event invokes the cancel callback for any close, so drop the
+        // callback first. Only a user-initiated close (the close button)
+        // may cancel the operation in progress.
+        _cbClose = {};
         WindowManager::close(WindowType::networkStatus);
         Gfx::invalidateScreen();
     }

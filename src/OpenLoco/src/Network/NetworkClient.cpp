@@ -383,9 +383,28 @@ void NetworkClient::onCancel()
     switch (_status)
     {
         case NetworkClientStatus::connecting:
+        case NetworkClientStatus::connectedSuccessfully:
+        case NetworkClientStatus::waitingForState:
+            // All three only ever happen while still at the title scene (a
+            // fresh join hasn't reached gameplay yet, and a facade-owned
+            // reconnect/migration-reclaim attempt never wires this callback
+            // in the first place - see initStatus()/endStatus() below) - so
+            // no scene transition is needed here, only tearing the attempt
+            // down.
             Logging::info("Connecting to server cancelled");
             // User-initiated: never auto-retry a cancelled connect attempt.
             _suppressAutoRetry = true;
+            close();
+            break;
+        case NetworkClientStatus::resyncing:
+            // Unlike the states above, a resync happens mid-gameplay (a
+            // desync, or the host loading a new save) - cancelling it must
+            // return to the title scene, not just silently close the status
+            // window while the resync keeps running unseen in the
+            // background.
+            Logging::info("Resync cancelled by user");
+            _suppressAutoRetry = true;
+            SceneManager::requestScene(SceneManager::SceneId::title);
             close();
             break;
         default:
@@ -673,6 +692,16 @@ void NetworkClient::receiveServerClosingPacket([[maybe_unused]] const ServerClos
     Logging::info("Server is shutting down");
     Ui::Windows::Chat::addMessage("Server", "Server is shutting down");
 
+    // Also shown via the NetworkStatus window (dismiss-only, no callback -
+    // this is terminal), not just chat: the chat window itself is an
+    // ordinary floating window and gets closed by Title::start()'s
+    // closeAllFloatingWindows() the moment the pending scene transition
+    // below is applied, which would otherwise make this message flash by
+    // and vanish before it can be read. NetworkStatus is exempt from that
+    // cleanup (WindowFlags::stickToFront) and survives into the title
+    // scene until the player dismisses it.
+    Ui::Windows::NetworkStatus::open("Server is shutting down", nullptr);
+
     // Request the title scene before tearing the connection down; requestScene
     // just sets a deferred flag applied once the current tick unwinds, so
     // order relative to close() below doesn't matter. Mirrors onClose()'s own
@@ -927,9 +956,34 @@ void NetworkClient::runGameCommandsForTick(uint32_t tick)
     updateLocalTick();
 }
 
+// True only while this instance is in the middle of a connection attempt
+// (_status == connecting) that the Network facade itself initiated as part
+// of a reconnect/migration-reclaim retry episode (setReconnectToken()/
+// setMigrationReclaim(), both called before connect()). The facade already
+// opened the status window itself (showReconnectStatus(), Network.cpp) with
+// its own cancel callback (giveUpReconnecting()/the migration equivalent)
+// wired to abort the whole episode - initStatus()/endStatus() below must
+// not clobber that mid-episode, only update the progress text. Scoped to
+// "still connecting" specifically: once past that (connectedSuccessfully
+// onward), or for any later resync on this same object, ownership of the
+// window reverts to this instance's own onCancel() as normal - the facade
+// clears its own retry bookkeeping the moment the connection is fully
+// re-established.
+bool NetworkClient::isFacadeOwnedConnectAttempt() const
+{
+    return (_isReconnectAttempt || _migrationReclaim) && _status == NetworkClientStatus::connecting;
+}
+
 void NetworkClient::initStatus(std::string_view text)
 {
-    Ui::Windows::NetworkStatus::open(text, [this]() { onCancel(); });
+    if (isFacadeOwnedConnectAttempt())
+    {
+        Ui::Windows::NetworkStatus::setText(text);
+    }
+    else
+    {
+        Ui::Windows::NetworkStatus::open(text, [this]() { onCancel(); });
+    }
 }
 
 void NetworkClient::setStatus(std::string_view text)
@@ -939,7 +993,18 @@ void NetworkClient::setStatus(std::string_view text)
 
 void NetworkClient::endStatus(std::string_view text)
 {
-    Ui::Windows::NetworkStatus::setText(text, nullptr);
+    if (isFacadeOwnedConnectAttempt())
+    {
+        // Don't disable the facade's give-up-to-title cancel callback
+        // mid-episode (the 1-arg setText() overload leaves it untouched) -
+        // just show the failure text until the next attempt (or the
+        // facade's own give-up path) updates or dismisses it.
+        Ui::Windows::NetworkStatus::setText(text);
+    }
+    else
+    {
+        Ui::Windows::NetworkStatus::setText(text, nullptr);
+    }
 }
 
 void NetworkClient::clearStatus()

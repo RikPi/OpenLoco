@@ -131,6 +131,14 @@ namespace OpenLoco::Network
         void processFullState(std::span<uint8_t const> data);
         void updateLocalTick();
 
+        // Whether this instance is mid-connect (_status == connecting) as a
+        // facade-driven reconnect/migration-reclaim retry attempt, as
+        // opposed to an ordinary user-initiated join - see initStatus()/
+        // endStatus() in NetworkClient.cpp for why this matters (the
+        // status window's cancel callback is owned by Network.cpp for the
+        // whole episode in that case, not by this instance's onCancel()).
+        bool isFacadeOwnedConnectAttempt() const;
+
         void initStatus(std::string_view text);
         void setStatus(std::string_view text);
         void clearStatus();
